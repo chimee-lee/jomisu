@@ -34,29 +34,50 @@ function MapScreen() {
     setTimeout(() => map.invalidateSize(), 200);
   }, []);
 
-  function locateMe() {
+    function locateMe() {
     if (!navigator.geolocation) {
       setStatus("Location is not supported on this browser");
       return;
     }
     setStatus("Finding you...");
+
+    const onSuccess = (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      const map = mapRef.current;
+      if (meRef.current) meRef.current.remove();
+      meRef.current = L.circleMarker([latitude, longitude], {
+        radius: 9,
+        color: "#fff",
+        weight: 3,
+        fillColor: "#1e88e5",
+        fillOpacity: 1,
+      }).addTo(map);
+      map.setView([latitude, longitude], 15);
+      setStatus(`You are here (accuracy about ${Math.round(accuracy)} m)`);
+    };
+
+    const onFail = (err) => {
+      if (err.code === 1) {
+        setStatus("Location blocked. Tap aA > Website Settings > Location > Allow.");
+      } else if (err.code === 2) {
+        setStatus("Location unavailable. Check Location Services is on.");
+      } else {
+        setStatus("Location timed out. Please try again.");
+      }
+    };
+
+    // Try fast/approximate first, then precise
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude, accuracy } = pos.coords;
-        const map = mapRef.current;
-        if (meRef.current) meRef.current.remove();
-        meRef.current = L.circleMarker([latitude, longitude], {
-          radius: 9,
-          color: "#fff",
-          weight: 3,
-          fillColor: "#1e88e5",
-          fillOpacity: 1,
-        }).addTo(map);
-        map.setView([latitude, longitude], 15);
-        setStatus(`You are here (accuracy about ${Math.round(accuracy)} m)`);
+      onSuccess,
+      (err) => {
+        if (err.code === 1) return onFail(err);
+        navigator.geolocation.getCurrentPosition(onSuccess, onFail, {
+          enableHighAccuracy: true,
+          timeout: 20000,
+          maximumAge: 0,
+        });
       },
-      () => setStatus("Could not get your location. Please allow location access."),
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }
     );
   }
 
