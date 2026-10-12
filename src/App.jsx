@@ -385,8 +385,24 @@ const TABS = [
 ];
 
 // ---------- App ----------
+// The current tab is kept in the URL hash (#maps, #stories...) so a refresh stays on it.
+const VALID_TABS = ["feed", "maps", "stories", "chat", "profile"];
+function tabFromHash() {
+  const h = window.location.hash.replace("#", "");
+  return VALID_TABS.includes(h) ? h : "maps"; // Maps stays the home screen
+}
 export default function App() {
-  const [tab, setTab] = useState("maps"); // Maps is the home screen
+  const [tab, setTab] = useState(tabFromHash);
+  function setTab(t) {
+    setTabState(t);
+    window.location.hash = t;
+  }
+  // Keep the tab in sync with the browser's Back button.
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [showSignIn, setShowSignIn] = useState(false);
