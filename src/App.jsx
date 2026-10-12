@@ -3,7 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import {
-  addDoc, collection, doc, getDoc, limit, onSnapshot, orderBy,
+  addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, limit, onSnapshot, orderBy,
   query, serverTimestamp, setDoc, Timestamp, where,
 } from "firebase/firestore";
 import { auth, db, googleProvider } from "./firebase";
@@ -130,31 +130,51 @@ function MapScreen({ active, stories, onPinTap, onLocated }) {
   );
 }
 
-// ---------- Reactions (preset emojis + any emoji from the native keyboard) ----------
-function ReactionBar() {
-  const [counts, setCounts] = useState({ "👍": 0, "🔥": 0, "😮": 0, "🚨": 0 });
-  const [mine, setMine] = useState({});
-  const [adding, setAdding] = useState(false);
+// ---------- Reactions (saved in Firestore: stories/{id}.reactions = { emoji: [uids] }) ----------
+const PRESETS = ["👍", "🔥", "😮", "🚨"];
 
-  function toggle(e) {
-    const on = !mine[e];
-    setMine({ ...mine, [e]: on });
-    setCounts({ ...counts, [e]: (counts[e] || 0) + (on ? 1 : -1) });
+function ReactionBar({ story, user, onNeedSignIn }) {
+  const [adding, setAdding] = useState(false);
+  const reactions = story.reactions || {};
+  // Always show the 4 presets, plus any custom emoji people have added.
+  const emojis = [...new Set([...PRESETS, ...Object.keys(reactions)])];
+
+  // Add or remove this user's reaction. arrayUnion/arrayRemove avoid overwriting others' reactions.
+  async function toggle(e) {
+    if (!user) return onNeedSignIn();
+    const has = (reactions[e] || []).includes(user.uid);
+    try {
+      await setDoc(
+        doc(db, "stories", story.id),
+        { reactions: { [e]: has ? arrayRemove(user.uid) : arrayUnion(user.uid) } },
+        { merge: true }
+      );
+    } catch (err) {
+      alert("Reaction failed: " + (err.code || err.message));
+    }
   }
+
+  // Custom emoji typed on the phone's native emoji keyboard.
   function onType(ev) {
     const e = firstEmoji(ev.target.value);
     ev.target.value = "";
     if (e) {
-      setCounts({ ...counts, [e]: (counts[e] || 0) + 1 });
-      setMine({ ...mine, [e]: true });
       setAdding(false);
+      toggle(e);
     }
   }
+
   return (
     <div className="reactions">
-      {Object.entries(counts).map(([e, n]) => (
-        <button key={e} className={mine[e] ? "chip on" : "chip"} onClick={() => toggle(e)}>{e} {n}</button>
-      ))}
+      {emojis.map((e) => {
+        const list = reactions[e] || [];
+        const mine = user && list.includes(user.uid);
+        return (
+          <button key={e} className={mine ? "chip on" : "chip"} onClick={() => toggle(e)}>
+            {e} {list.length}
+          </button>
+        );
+      })}
       {adding ? (
         <input className="emoji-input" autoFocus placeholder="Use 😀 keyboard" onChange={onType} onBlur={() => setAdding(false)} />
       ) : (
@@ -169,7 +189,7 @@ function Badge({ status }) {
   return <span className="badge">{status}</span>;
 }
 
-function StoryCard({ story, userPos }) {
+function StoryCard({ story, userPos, user, onNeedSignIn }) {
   const km = userPos ? distanceKm(userPos, story) : null;
   return (
     <div className="card">
@@ -182,7 +202,7 @@ function StoryCard({ story, userPos }) {
           {km !== null && ` · ${km < 1 ? Math.round(km * 1000) + " m" : km.toFixed(1) + " km"} away`}
           {story.approximate && " · approximate location"}
         </p>
-        <ReactionBar />
+         <ReactionBar story={story} user={user} onNeedSignIn={onNeedSignIn} />
       </div>
     </div>
   );
@@ -468,7 +488,9 @@ export default function App() {
           <div className="page">
             <h2>Stories</h2>
             {liveStories.length === 0 && <p className="muted">No live stories yet. Tap 📷 to post the first one.</p>}
-            {liveStories.map((s) => <StoryCard key={s.id} story={s} userPos={userPos} />)}
+            {liveStories.map((s) => (
+  <StoryCard key={s.id} story={s} userPos={userPos} user={user} onNeedSignIn={() => setShowSignIn(true)} />
+))}
           </div>
         )}
         {tab === "chat" && <Placeholder title="Chat" text="Coming soon." />}
