@@ -1,36 +1,45 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
-body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  background: #f4f6f8;
-  color: #1c1e21;
-}
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; color: #1c1e21; }
+
 .app { display: flex; flex-direction: column; height: 100dvh; max-width: 520px; margin: 0 auto; background: #fff; }
-.screen { flex: 1; position: relative; min-height: 0; }
+.topbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #eee; }
+.search { flex: 1; min-width: 0; padding: 10px 16px; border: 1px solid #ddd; border-radius: 22px; font-size: 15px; }
+.cam { width: 42px; height: 42px; flex: none; border: none; border-radius: 50%; background: #e53935; color: #fff; font-size: 20px; }
+
+.screen { flex: 1; position: relative; min-height: 0; overflow: hidden; }
 .map-screen { position: relative; height: 100%; }
 .map { position: absolute; inset: 0; }
-.top-bar { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 1000; }
-.search {
-  width: 100%; padding: 12px 16px; border: none; border-radius: 24px;
-  font-size: 15px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
-}
-.status {
-  position: absolute; left: 12px; bottom: 12px; z-index: 1000;
-  max-width: calc(100% - 84px);
-  background: rgba(255,255,255,.95); padding: 6px 12px; border-radius: 12px;
-  font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,.2);
-}
-.locate {
-  position: absolute; right: 12px; bottom: 12px; z-index: 1000;
-  width: 48px; height: 48px; border-radius: 50%; border: none;
-  background: #fff; font-size: 22px; box-shadow: 0 2px 8px rgba(0,0,0,.3);
-}
+.status { position: absolute; left: 12px; bottom: 12px; z-index: 1000; max-width: calc(100% - 84px);
+  background: rgba(255,255,255,.95); padding: 6px 12px; border-radius: 12px; font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+.locate { position: absolute; right: 12px; bottom: 12px; z-index: 1000; width: 48px; height: 48px;
+  border-radius: 50%; border: none; background: #fff; font-size: 22px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+
 .nav { display: flex; border-top: 1px solid #ddd; background: #fff; }
-.nav button {
-  flex: 1; padding: 8px 0 10px; border: none; background: none;
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  font-size: 12px; color: #6b7280;
-}
-.nav button .icon { font-size: 22px; }
+.nav button { flex: 1; padding: 8px 0 10px; border: none; background: none; display: flex; flex-direction: column;
+  align-items: center; gap: 2px; font-size: 11px; color: #6b7280; }
+.nav button .icon { font-size: 21px; }
 .nav button.active { color: #e53935; font-weight: 600; }
-.placeholder { padding: 32px 24px; text-align: center; }
+
+.page { height: 100%; overflow: auto; padding: 16px; }
+.muted { color: #6b7280; font-size: 13px; }
+.card { display: flex; gap: 12px; padding: 12px; border: 1px solid #eee; border-radius: 12px; }
+.thumb { width: 72px; height: 72px; flex: none; border-radius: 10px; background: #e5e7eb; display: grid; place-items: center; font-size: 28px; }
+.thumb.big { width: 100%; height: 140px; margin-bottom: 12px; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #fff3cd; color: #8a6d00; }
+
+.reactions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { border: 1px solid #ddd; background: #fff; border-radius: 16px; padding: 4px 10px; font-size: 14px; }
+.chip.on { background: #fde8e8; border-color: #e53935; }
+.emoji-input { width: 110px; border: 1px solid #ddd; border-radius: 16px; padding: 4px 10px; font-size: 14px; }
+
+.ask { position: absolute; top: 8px; left: 12px; right: 12px; z-index: 1100; max-height: 60%; overflow: auto;
+  background: #fff; border-radius: 14px; padding: 12px 16px; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+.ask .x { position: absolute; right: 8px; top: 6px; border: none; background: none; font-size: 16px; }
+
+.modal-bg { position: fixed; inset: 0; z-index: 3000; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
+.modal { width: 100%; max-width: 520px; background: #fff; border-radius: 16px 16px 0 0; padding: 20px; }
+
+.primary { width: 100%; padding: 12px; border: none; border-radius: 10px; background: #e53935; color: #fff; font-size: 16px; margin-top: 8px; }
+.link { width: 100%; padding: 10px; border: none; background: none; color: #6b7280; font-size: 14px; }
+.field { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 15px; }
