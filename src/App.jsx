@@ -2,32 +2,29 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import {
+  addDoc, collection, doc, getDoc, limit, onSnapshot, orderBy,
+  query, serverTimestamp, setDoc, Timestamp, where,
+} from "firebase/firestore";
 import { auth, db, googleProvider } from "./firebase";
+import { CATEGORIES, iconFor } from "./categories";
+import { compressImage } from "./media";
+import { distanceKm, roundCoord, timeAgo } from "./geo";
 
-// ---------- Demo data (staged, labelled as demo) ----------
-const DEMO_PIN = {
-  lat: 5.3565,
-  lng: 100.352,
-  title: "Accident near Km 7, Penang Bridge",
-  tag: "🚗 Accident",
-  status: "Unconfirmed",
-  reports: 1,
-};
-const DEFAULT_CENTER = [5.39, 100.33];
+const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is found
+const PENANG_BRIDGE = [5.3565, 100.352];
+const STATUS_COLOR = { Unconfirmed: "#f59e0b", Confirmed: "#22a45d", Conflicting: "#8e44ad" };
 
 // ---------- Helpers ----------
-// Returns the first emoji typed (from the phone's native emoji keyboard), or null.
+// First emoji typed on the phone's native emoji keyboard, or null.
 const EMOJI_RE = /^(\p{Extended_Pictographic}|\p{Regional_Indicator})/u;
 function firstEmoji(text) {
   const seg = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-  for (const { segment } of seg.segment(text)) {
-    return EMOJI_RE.test(segment) ? segment : null;
-  }
+  for (const { segment } of seg.segment(text)) return EMOJI_RE.test(segment) ? segment : null;
   return null;
 }
 
-// Create the user's Firestore profile on first sign-in; return the profile.
+// Create the user's Firestore profile on first sign-in; return it.
 async function ensureUserDoc(user) {
   const ref = doc(db, "users", user.uid);
   const snap = await getDoc(ref);
@@ -42,34 +39,15 @@ async function ensureUserDoc(user) {
 }
 
 // ---------- Map screen ----------
-function MapScreen({ active, onPinTap }) {
+function MapScreen({ active, stories, onPinTap, onLocated }) {
   const mapDiv = useRef(null);
   const mapRef = useRef(null);
   const meRef = useRef(null);
-  const [status, setStatus] = useState("Tap 📍 to show your location");
+  const pinsRef = useRef(null);
+  const [status, setStatus] = useState("Finding your location...");
+  const [me, setMe] = useState(null);
 
-  useEffect(() => {
-    if (mapRef.current) return;
-    const map = L.map(mapDiv.current, { zoomControl: false }).setView(DEFAULT_CENTER, 12);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors",
-    }).addTo(map);
-
-    L.circleMarker([DEMO_PIN.lat, DEMO_PIN.lng], {
-      radius: 12, color: "#fff", weight: 3, fillColor: "#e53935", fillOpacity: 1,
-    })
-      .addTo(map)
-      .on("click", () => onPinTap(DEMO_PIN)); // opens the pin popup
-
-    mapRef.current = map;
-  }, [onPinTap]);
-
-  // Leaflet needs a size refresh whenever the map tab becomes visible again.
-  useEffect(() => {
-    if (active && mapRef.current) setTimeout(() => mapRef.current.invalidateSize(), 100);
-  }, [active]);
-
+  // Locate the user: fast/approximate first, then precise.
   function locateMe() {
     if (!navigator.geolocation) return setStatus("Location is not supported on this browser");
     setStatus("Finding you...");
@@ -81,14 +59,15 @@ function MapScreen({ active, onPinTap }) {
         radius: 9, color: "#fff", weight: 3, fillColor: "#1e88e5", fillOpacity: 1,
       }).addTo(map);
       map.setView([latitude, longitude], 15);
+      setMe({ lat: latitude, lng: longitude });
+      onLocated({ lat: latitude, lng: longitude });
       setStatus(`You are here (accuracy about ${Math.round(accuracy)} m)`);
     };
     const onFail = (err) => {
       if (err.code === 1) setStatus("Location blocked. Tap aA > Website Settings > Location > Allow.");
       else if (err.code === 2) setStatus("Location unavailable. Check Location Services is on.");
-      else setStatus("Location timed out. Please try again.");
+      else setStatus("Location timed out. Tap 📍 to try again.");
     };
-    // Try fast/approximate first, then precise
     navigator.geolocation.getCurrentPosition(
       onSuccess,
       (err) => {
@@ -101,9 +80,50 @@ function MapScreen({ active, onPinTap }) {
     );
   }
 
+  // Create the map once, then open it at the user's own location.
+  useEffect(() => {
+    if (mapRef.current) return;
+    const map = L.map(mapDiv.current, { zoomControl: false }).setView(DEFAULT_CENTER, 12);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+    pinsRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    locateMe();
+  }, []); // eslint-disable-line
+
+  // Redraw story pins whenever the live story list changes.
+  useEffect(() => {
+    if (!pinsRef.current) return;
+    pinsRef.current.clearLayers();
+    stories.forEach((s) => {
+      L.circleMarker([s.lat, s.lng], {
+        radius: 12, color: "#fff", weight: 3,
+        fillColor: STATUS_COLOR[s.status] || "#e53935", fillOpacity: 1,
+      })
+        .on("click", () => onPinTap(s))
+        .addTo(pinsRef.current);
+    });
+  }, [stories, onPinTap]);
+
+  // Leaflet needs a size refresh whenever the map tab becomes visible again.
+  useEffect(() => {
+    if (active && mapRef.current) setTimeout(() => mapRef.current.invalidateSize(), 100);
+  }, [active]);
+
+  const noneNearby = me && !stories.some((s) => distanceKm(me, s) <= 5);
+
   return (
     <div className="map-screen">
       <div ref={mapDiv} className="map" />
+      {noneNearby && (
+        <div className="banner">
+          No stories nearby.{" "}
+          <button onClick={() => mapRef.current.setView(PENANG_BRIDGE, 13)}>
+            View demo stories at Penang Bridge
+          </button>
+        </div>
+      )}
       <div className="status">{status}</div>
       <button className="locate" onClick={locateMe} aria-label="Show my location">📍</button>
     </div>
@@ -112,7 +132,7 @@ function MapScreen({ active, onPinTap }) {
 
 // ---------- Reactions (preset emojis + any emoji from the native keyboard) ----------
 function ReactionBar() {
-  const [counts, setCounts] = useState({ "👍": 12, "🔥": 4, "😮": 3, "🚨": 6 });
+  const [counts, setCounts] = useState({ "👍": 0, "🔥": 0, "😮": 0, "🚨": 0 });
   const [mine, setMine] = useState({});
   const [adding, setAdding] = useState(false);
 
@@ -133,9 +153,7 @@ function ReactionBar() {
   return (
     <div className="reactions">
       {Object.entries(counts).map(([e, n]) => (
-        <button key={e} className={mine[e] ? "chip on" : "chip"} onClick={() => toggle(e)}>
-          {e} {n}
-        </button>
+        <button key={e} className={mine[e] ? "chip on" : "chip"} onClick={() => toggle(e)}>{e} {n}</button>
       ))}
       {adding ? (
         <input className="emoji-input" autoFocus placeholder="Use 😀 keyboard" onChange={onType} onBlur={() => setAdding(false)} />
@@ -146,20 +164,138 @@ function ReactionBar() {
   );
 }
 
-function StoryCard() {
+// ---------- Story pieces ----------
+function Badge({ status }) {
+  return <span className="badge">{status}</span>;
+}
+
+function StoryCard({ story, userPos }) {
+  const km = userPos ? distanceKm(userPos, story) : null;
   return (
     <div className="card">
-      <div className="thumb">📸</div>
+      <div className="thumb"><img src={story.imageData} alt="" /></div>
       <div>
-        <b>{DEMO_PIN.tag}</b> <span className="badge">{DEMO_PIN.status}</span>
-        <p className="muted">{DEMO_PIN.title} · demo data</p>
+        <b>{iconFor(story.category)} {story.category}</b> <Badge status={story.status} />
+        <p className="muted">
+          {story.caption || "No caption"}<br />
+          {timeAgo(story.createdMs)} · {story.authorName}
+          {km !== null && ` · ${km < 1 ? Math.round(km * 1000) + " m" : km.toFixed(1) + " km"} away`}
+          {story.approximate && " · approximate location"}
+        </p>
         <ReactionBar />
       </div>
     </div>
   );
 }
 
-// ---------- Overlays ----------
+function PinModal({ story, onClose }) {
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal tall" onClick={(e) => e.stopPropagation()}>
+        <div className="thumb big"><img src={story.imageData} alt="" /></div>
+        <h3>{iconFor(story.category)} {story.category}</h3>
+        <p><Badge status={story.status} /></p>
+        <p>{story.caption || "No caption"}</p>
+        <p className="muted">
+          {timeAgo(story.createdMs)} · {story.authorName}
+          {story.approximate && " · approximate location"}
+        </p>
+        <button className="link" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Post a story ----------
+function PostModal({ user, profile, initialPos, onClose, onPosted }) {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState("");
+  const [category, setCategory] = useState("");
+  const [caption, setCaption] = useState("");
+  const [approx, setApprox] = useState(false);
+  const [pos, setPos] = useState(initialPos);
+  const [geoMsg, setGeoMsg] = useState(initialPos ? "Location ready" : "Getting your location...");
+  const [busy, setBusy] = useState(false);
+
+  // Get a fresh GPS fix when the form opens.
+  useEffect(() => {
+    navigator.geolocation.getCurrentPosition(
+      (p) => { setPos({ lat: p.coords.latitude, lng: p.coords.longitude }); setGeoMsg("Location ready"); },
+      () => setGeoMsg(initialPos ? "Using your last known location" : "Location unavailable. Allow location access and reopen."),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    );
+  }, []); // eslint-disable-line
+
+  function onPick(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+  }
+
+  async function submit() {
+    setBusy(true);
+    try {
+      const imageData = await compressImage(file);
+      const used = approx ? { lat: roundCoord(pos.lat), lng: roundCoord(pos.lng) } : pos;
+      await addDoc(collection(db, "stories"), {
+        uid: user.uid,
+        authorName: profile?.displayName || user.displayName || "Jomisu user",
+        category,
+        caption: caption.trim().slice(0, 280),
+        lat: used.lat,
+        lng: used.lng,
+        approximate: approx,
+        imageData,                       // small JPEG stored in Firestore (no Cloud Storage needed)
+        status: "Unconfirmed",           // becomes Confirmed/Conflicting once clustering is added
+        createdAt: serverTimestamp(),
+        expiresAt: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000), // 24-hour story
+      });
+      onPosted();
+    } catch (err) {
+      alert("Post failed: " + (err.code || err.message));
+      setBusy(false);
+    }
+  }
+
+  const ready = file && category && pos && !busy;
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal tall" onClick={(e) => e.stopPropagation()}>
+        <h3>Post a story</h3>
+        {preview && <img className="preview" src={preview} alt="preview" />}
+        <label className="primary pick">
+          {file ? "Change photo" : "📷 Take or choose a photo"}
+          <input type="file" accept="image/*" hidden onChange={onPick} />
+        </label>
+
+        <p className="muted">Category</p>
+        <div className="cat-grid">
+          {CATEGORIES.map((c) => (
+            <button key={c.id} className={category === c.id ? "chip sel" : "chip"} onClick={() => setCategory(c.id)}>
+              {c.icon} {c.id}
+            </button>
+          ))}
+        </div>
+
+        <textarea className="field" rows={2} maxLength={280} placeholder="What's happening? (optional)"
+                  value={caption} onChange={(e) => setCaption(e.target.value)} />
+
+        <label className="toggle">
+          <input type="checkbox" checked={approx} onChange={(e) => setApprox(e.target.checked)} />
+          Use approximate location (about 500 m)
+        </label>
+        <p className="muted">📍 {geoMsg}</p>
+        <p className="muted">Use staged photos only. Automatic blur of faces and plates is added in a later step.</p>
+
+        <button className="primary" disabled={!ready} onClick={submit}>{busy ? "Posting..." : "Post story"}</button>
+        <button className="link" onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Other overlays and screens ----------
 function SignInModal({ onClose, onSignIn }) {
   return (
     <div className="modal-bg" onClick={onClose}>
@@ -173,36 +309,19 @@ function SignInModal({ onClose, onSignIn }) {
   );
 }
 
-function PinModal({ pin, onClose }) {
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="thumb big">📸</div>
-        <h3>{pin.title}</h3>
-        <p>
-          <b>{pin.tag}</b> <span className="badge">{pin.status}</span>
-        </p>
-        <p className="muted">{pin.reports} report · staged demo data</p>
-        <button className="link" onClick={onClose}>Close</button>
-      </div>
-    </div>
-  );
-}
-
-// Ask a Place card: layout only for now; Gemini fills it in Step 5.
+// Ask a Place card: layout only for now; Gemini fills it in a later step.
 function AskCard({ query, onClose }) {
   return (
     <div className="ask">
       <button className="x" onClick={onClose} aria-label="Close">✕</button>
       <p className="muted">🔍 "{query}"</p>
       <b>🤖 Gemini Place Intelligence Summary</b>
-      <p>Layout preview. The real answer from Gemini arrives in Step 5.</p>
+      <p>Layout preview. The real answer from Gemini arrives in a later step.</p>
       <p className="muted">🕒 Updated — · Confidence: — (verified by N posts)</p>
     </div>
   );
 }
 
-// ---------- Profile (name editable, saved to Firestore) ----------
 function Profile({ user, profile, onSignIn, onSaveName }) {
   const [name, setName] = useState(profile?.displayName || "");
   useEffect(() => setName(profile?.displayName || ""), [profile]);
@@ -251,17 +370,56 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [showSignIn, setShowSignIn] = useState(false);
+  const [showPost, setShowPost] = useState(false);
   const [pin, setPin] = useState(null);
-  const [query, setQuery] = useState("");
+  const [userPos, setUserPos] = useState(null);
+  const [stories, setStories] = useState([]);
+  const [query_, setQuery] = useState("");
   const [asked, setAsked] = useState("");
 
   // Keep user + Firestore profile in sync with Firebase Auth.
   useEffect(() => {
     return onAuthStateChanged(auth, async (u) => {
       setUser(u);
-      setProfile(u ? await ensureUserDoc(u) : null);
+      try {
+        setProfile(u ? await ensureUserDoc(u) : null);
+      } catch (err) {
+        console.error("Profile load failed:", err);
+        setProfile(null);
+      }
     });
   }, []);
+
+  // Live list of stories that have not expired (newest 50).
+  useEffect(() => {
+    const q = query(
+      collection(db, "stories"),
+      where("expiresAt", ">", Timestamp.now()),
+      orderBy("expiresAt", "desc"),
+      limit(50)
+    );
+    return onSnapshot(
+      q,
+      (snap) =>
+        setStories(
+          snap.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              ...data,
+              createdMs: data.createdAt?.toMillis?.() ?? Date.now(),
+              expiresMs: data.expiresAt.toMillis(),
+            };
+          })
+        ),
+      (err) => console.error("Stories listener failed:", err)
+    );
+  }, []);
+
+  // Hide stories that expired while the page stayed open.
+  const liveStories = stories
+    .filter((s) => s.expiresMs > Date.now())
+    .sort((a, b) => b.createdMs - a.createdMs);
 
   async function handleSignIn() {
     try {
@@ -272,16 +430,21 @@ export default function App() {
     }
   }
   async function saveName(displayName) {
-    await setDoc(doc(db, "users", user.uid), { displayName }, { merge: true });
-    setProfile({ ...profile, displayName });
+    try {
+      await setDoc(doc(db, "users", user.uid), { displayName }, { merge: true });
+      setProfile({ ...profile, displayName });
+      alert("Saved ✓");
+    } catch (err) {
+      alert("Save failed: " + err.code);
+    }
   }
   function onCamera() {
     if (!user) return setShowSignIn(true);
-    alert("Camera/upload comes in Step 4."); // placeholder
+    setShowPost(true);
   }
   function onSearch(e) {
     e.preventDefault();
-    if (query.trim()) setAsked(query.trim());
+    if (query_.trim()) setAsked(query_.trim());
   }
 
   const showTopBar = ["feed", "maps", "stories"].includes(tab);
@@ -290,7 +453,7 @@ export default function App() {
     <div className="app">
       {showTopBar && (
         <form className="topbar" onSubmit={onSearch}>
-          <input className="search" value={query} onChange={(e) => setQuery(e.target.value)}
+          <input className="search" value={query_} onChange={(e) => setQuery(e.target.value)}
                  placeholder="Ask a place, e.g. What happened on Penang Bridge?" />
           <button type="button" className="cam" onClick={onCamera} aria-label="Post a story">📷</button>
         </form>
@@ -298,13 +461,14 @@ export default function App() {
 
       <div className="screen">
         <div style={{ display: tab === "maps" ? "block" : "none", height: "100%" }}>
-          <MapScreen active={tab === "maps"} onPinTap={setPin} />
+          <MapScreen active={tab === "maps"} stories={liveStories} onPinTap={setPin} onLocated={setUserPos} />
         </div>
         {tab === "feed" && <Placeholder title="Feed" text="Credible news from the last 24 hours: coming soon." />}
         {tab === "stories" && (
           <div className="page">
             <h2>Stories</h2>
-            <StoryCard />
+            {liveStories.length === 0 && <p className="muted">No live stories yet. Tap 📷 to post the first one.</p>}
+            {liveStories.map((s) => <StoryCard key={s.id} story={s} userPos={userPos} />)}
           </div>
         )}
         {tab === "chat" && <Placeholder title="Chat" text="Coming soon." />}
@@ -324,7 +488,12 @@ export default function App() {
       </nav>
 
       {showSignIn && <SignInModal onClose={() => setShowSignIn(false)} onSignIn={handleSignIn} />}
-      {pin && <PinModal pin={pin} onClose={() => setPin(null)} />}
+      {showPost && (
+        <PostModal user={user} profile={profile} initialPos={userPos}
+                   onClose={() => setShowPost(false)}
+                   onPosted={() => { setShowPost(false); setTab("maps"); }} />
+      )}
+      {pin && <PinModal story={pin} onClose={() => setPin(null)} />}
     </div>
   );
 }

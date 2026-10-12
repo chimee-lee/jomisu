@@ -43,3 +43,15 @@ body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; ba
 .primary { width: 100%; padding: 12px; border: none; border-radius: 10px; background: #e53935; color: #fff; font-size: 16px; margin-top: 8px; }
 .link { width: 100%; padding: 10px; border: none; background: none; color: #6b7280; font-size: 14px; }
 .field { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 15px; }
+/* ---- Step 4 additions ---- */
+.thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; }
+.modal.tall { max-height: 92dvh; overflow: auto; }
+.preview { width: 100%; max-height: 220px; object-fit: cover; border-radius: 12px; margin-bottom: 8px; }
+.pick { display: block; text-align: center; cursor: pointer; }
+.cat-grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.chip.sel { background: #fde8e8; border-color: #e53935; }
+.toggle { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; font-size: 14px; }
+.primary:disabled { background: #cbd5e1; }
+.banner { position: absolute; top: 8px; left: 12px; right: 12px; z-index: 1000; background: #fff8e1;
+  border: 1px solid #f59e0b; border-radius: 12px; padding: 8px 12px; font-size: 13px; }
+.banner button { border: none; background: none; color: #e53935; font-weight: 600; padding: 0; }
