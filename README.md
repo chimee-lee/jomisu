@@ -1,16 +1,30 @@
-# React + Vite
+# Jomisu: what's happening here, right now?
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Jomisu ("what is happening?" in Hokkien) is a real-time, location-based app for the Google Cloud AI Builder Cup 2026. People post 24-hour photo stories about what they see, and the app shows them on a map so others can understand a place before they go.
 
-Currently, two official plugins are available:
+Live prototype: https://jomisu.web.app
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## What works today
+- Map-first home screen, opening at the user's own location (Leaflet + OpenStreetMap)
+- Google sign-in (Firebase Authentication); browsing needs no account
+- Post a photo story: 10 categories, caption, exact or approximate location
+- Photos compressed to 800 px in the browser; stories expire after 24 hours
+- Live pins, story cards and emoji reactions stored in Firestore
+- Gemini auto-tagging and "Ask a Place": in progress (see BUILD_LOG.md)
 
-## React Compiler
+## Tech stack (all Google Cloud / Firebase)
+- Firebase Hosting (deployment), Firebase Authentication, Cloud Firestore
+- Gemini through Firebase AI Logic (in progress)
+- React + Vite front end, Leaflet map
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Run locally
+    npm install
+    npm run dev
 
-## Expanding the ESLint configuration
+Deploy: npm run build, then firebase deploy --only hosting.
+Firestore security rules: see firestore.rules.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Notes
+- Demo uses staged photos only. Do not upload real people or number plates.
+- No API secrets are stored in this repo; the Firebase web config is public by design.
+- Build history: BUILD_LOG.md

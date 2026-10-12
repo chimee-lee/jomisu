@@ -392,7 +392,7 @@ function tabFromHash() {
   return VALID_TABS.includes(h) ? h : "maps"; // Maps stays the home screen
 }
 export default function App() {
-  const [tab, setTab] = useState(tabFromHash);
+    const [tab, setTabState] = useState(tabFromHash);
   function setTab(t) {
     setTabState(t);
     window.location.hash = t;
