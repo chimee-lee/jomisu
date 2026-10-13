@@ -25,10 +25,19 @@ const schema = Schema.object({
 });
 
 const ai = getAI(app, { backend: new GoogleAIBackend() });
-const model = getGenerativeModel(ai, {
-  model: "gemini-3.8-flash",
-  generationConfig: { responseMimeType: "application/json", responseSchema: schema },
-});
+const model = getGenerativeModel(
+  ai,
+  {
+    model: "gemini-3.8-flash",
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+      // Low thinking: much faster for a simple photo-classification job.
+      thinkingConfig: { thinkingLevel: "LOW" },
+    },
+  },
+  { timeout: 45000 } // give up after 45 s instead of the 3-minute default
+);
 
 const PROMPT = `You analyse one community report about something happening at a place.
 The media is either one photo, or several frames sampled in order from the first 5 seconds of a short video.
@@ -64,6 +73,12 @@ export async function analyseStory({ frames, isVideo, caption }) {
     `Media: ${isVideo ? `${frames.length} frames from a video` : "one photo"}\nCaption: ${caption || "(none)"}`,
   ];
   for (const f of frames) parts.push({ inlineData: await toInlineData(f) });
-  const result = await model.generateContent(parts);
+  let result;
+  try {
+    result = await model.generateContent(parts);
+  } catch (err) {
+    if (/abort/i.test(String(err?.message))) throw new Error("The AI took longer than 45 seconds");
+    throw err;
+  }
   return JSON.parse(result.response.text());
 }
