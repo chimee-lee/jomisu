@@ -9,6 +9,8 @@ import {
 import { auth, db, googleProvider } from "./firebase";
 import { CATEGORIES, iconFor } from "./categories";
 import { compressImage } from "./media";
+import { analyseStory } from "./gemini";
+import { extractVideoFrames } from "./video";
 import { distanceKm, roundCoord, timeAgo } from "./geo";
 
 const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is found
@@ -189,32 +191,103 @@ function Badge({ status }) {
   return <span className="badge">{status}</span>;
 }
 
+// Severity colours for the small pill on cards.
+const SEVERITY_COLOR = { low: "#2e7d32", medium: "#ef6c00", high: "#c62828", unknown: "#6b7280" };
+
+function SeverityPill({ severity }) {
+  return (
+    <span
+      style={{
+        background: SEVERITY_COLOR[severity] || SEVERITY_COLOR.unknown, color: "#fff",
+        borderRadius: 10, padding: "1px 8px", fontSize: 12, marginLeft: 6,
+      }}
+    >
+      severity: {severity}
+    </span>
+  );
+}
+
+// "Others" stories show what the AI saw, e.g. "Others (Indoor office interior)".
+const categoryLabel = (s) =>
+  s.category === "Others" && s.ai?.otherLabel ? `Others (${s.ai.otherLabel})` : s.category;
+
+// Story photo. Sensitive photos are blurred until tapped; video stories get a badge.
+function StoryImage({ story, big }) {
+  const [revealed, setRevealed] = useState(false);
+  const hidden = !!story.ai?.sensitiveContent && !revealed;
+  return (
+    <div
+      className={big ? "thumb big" : "thumb"}
+      style={{ position: "relative", overflow: "hidden", cursor: hidden ? "pointer" : "default" }}
+      onClick={() => hidden && setRevealed(true)}
+    >
+      <img
+        src={story.imageData}
+        alt=""
+        style={hidden ? { filter: "blur(22px)", transform: "scale(1.2)" } : undefined}
+      />
+      {hidden && (
+        <div
+          style={{
+            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.35)",
+            color: "#fff", textAlign: "center", fontSize: big ? 15 : 10, padding: 4,
+          }}
+        >
+          <span style={{ fontSize: big ? 28 : 18 }}>⚠️</span>
+          Sensitive content. Tap to view
+        </div>
+      )}
+      {story.mediaType === "video" && !hidden && (
+        <span
+          style={{
+            position: "absolute", right: 4, bottom: 4, background: "rgba(0,0,0,.6)", color: "#fff",
+            borderRadius: 6, padding: "1px 6px", fontSize: big ? 13 : 10,
+          }}
+        >
+          ▶ video
+        </span>
+      )}
+    </div>
+  );
+}
+
 function StoryCard({ story, userPos, user, onNeedSignIn }) {
   const km = userPos ? distanceKm(userPos, story) : null;
   return (
     <div className="card">
-      <div className="thumb"><img src={story.imageData} alt="" /></div>
+      <StoryImage story={story} />
       <div>
-        <b>{iconFor(story.category)} {story.category}</b> <Badge status={story.status} />
+        <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.status} />
+        {story.ai && <SeverityPill severity={story.ai.severity} />}
+        {story.ai?.summary && <p style={{ margin: "4px 0" }}>✨ {story.ai.summary}</p>}
         <p className="muted">
           {story.caption || "No caption"}<br />
           {timeAgo(story.createdMs)} · {story.authorName}
           {km !== null && ` · ${km < 1 ? Math.round(km * 1000) + " m" : km.toFixed(1) + " km"} away`}
           {story.approximate && " · approximate location"}
         </p>
-         <ReactionBar story={story} user={user} onNeedSignIn={onNeedSignIn} />
+        <ReactionBar story={story} user={user} onNeedSignIn={onNeedSignIn} />
       </div>
     </div>
   );
 }
 
 function PinModal({ story, onClose }) {
+  // The user kept their own category although the AI suggested a different one.
+  const aiDisagreed = story.categoryChoice === "mine" && story.aiCategory && story.aiCategory !== story.category;
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal tall" onClick={(e) => e.stopPropagation()}>
-        <div className="thumb big"><img src={story.imageData} alt="" /></div>
-        <h3>{iconFor(story.category)} {story.category}</h3>
-        <p><Badge status={story.status} /></p>
+        <StoryImage story={story} big />
+        <h3>{iconFor(story.category)} {categoryLabel(story)}</h3>
+        <p>
+          <Badge status={story.status} />
+          {story.ai && <SeverityPill severity={story.ai.severity} />}
+        </p>
+        {story.ai?.summary && <p>✨ {story.ai.summary}</p>}
+        {story.ai?.placeDetail && <p className="muted">Place detail: {story.ai.placeDetail}</p>}
+        {aiDisagreed && <p className="muted">AI suggested: {iconFor(story.aiCategory)} {story.aiCategory}</p>}
         <p>{story.caption || "No caption"}</p>
         <p className="muted">
           {timeAgo(story.createdMs)} · {story.authorName}
@@ -228,16 +301,25 @@ function PinModal({ story, onClose }) {
 
 // ---------- Post a story ----------
 function PostModal({ user, profile, initialPos, onClose, onPosted }) {
-  const [file, setFile] = useState(null);
+  // Media: { isVideo, still, frames }. `still` is the one image we save; `frames` go to Gemini.
+  const [media, setMedia] = useState(null);
   const [preview, setPreview] = useState("");
-  const [category, setCategory] = useState("");
+  const [preparing, setPreparing] = useState(false);
+  const [mediaError, setMediaError] = useState("");
+  const [category, setCategory] = useState(""); // the user's own pick
   const [caption, setCaption] = useState("");
   const [approx, setApprox] = useState(false);
   const [pos, setPos] = useState(initialPos);
   const [geoMsg, setGeoMsg] = useState(initialPos ? "Location ready" : "Getting your location...");
   const [busy, setBusy] = useState(false);
 
-  // Get a fresh GPS fix when the form opens.
+  // Gemini analysis state
+  const [ai, setAi] = useState(null);
+  const [analysing, setAnalysing] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [choice, setChoice] = useState("mine"); // "mine" or "ai" (only matters on a mismatch)
+
+  // Get a fresh GPS fix when the form opens (runs silently in the background).
   useEffect(() => {
     navigator.geolocation.getCurrentPosition(
       (p) => { setPos({ lat: p.coords.latitude, lng: p.coords.longitude }); setGeoMsg("Location ready"); },
@@ -246,28 +328,92 @@ function PostModal({ user, profile, initialPos, onClose, onPosted }) {
     );
   }, []); // eslint-disable-line
 
-  function onPick(e) {
+  const iconOf = (id) => CATEGORIES.find((c) => c.id === id)?.icon || "📍";
+  const labelOf = (r) => `${iconOf(r.category)} ${r.category}${r.category === "Others" && r.otherLabel ? ` (${r.otherLabel})` : ""}`;
+
+  function resetAi() {
+    setAi(null);
+    setAiError("");
+    setChoice("mine");
+  }
+
+  // Photo: compress it. Video: sample frames from its first 5 seconds (nothing is uploaded).
+  async function onPick(e) {
     const f = e.target.files?.[0];
     if (!f) return;
-    setFile(f);
-    setPreview(URL.createObjectURL(f));
+    resetAi();
+    setMedia(null);
+    setMediaError("");
+    setPreparing(true);
+    try {
+      if (f.type.startsWith("video/")) {
+        const frames = await extractVideoFrames(f);
+        setMedia({ isVideo: true, still: frames[0], frames });
+        setPreview(frames[0]);
+      } else {
+        const still = await compressImage(f);
+        setMedia({ isVideo: false, still, frames: [still] });
+        setPreview(URL.createObjectURL(f));
+      }
+    } catch (err) {
+      console.error("Could not read media:", err);
+      setMediaError("Could not read this file. Please try another photo or video.");
+    } finally {
+      setPreparing(false);
+    }
   }
+
+  // Ask Gemini what the media shows. The user's category is NOT sent, so the AI is unbiased.
+  async function analyse() {
+    setAnalysing(true);
+    setAiError("");
+    try {
+      const result = await analyseStory({ frames: media.frames, isVideo: media.isVideo, caption: caption.trim() });
+      setAi(result);
+      setChoice("mine");
+    } catch (err) {
+      console.error("Gemini analysis failed:", err);
+      setAiError(err?.message || err?.code || "unknown error");
+    } finally {
+      setAnalysing(false);
+    }
+  }
+
+  // Mismatch is computed here, so changing the category chip after analysing needs no re-analysis.
+  const mismatch = !!ai && ai.category !== category;
+  const finalCategory = mismatch && choice === "ai" ? ai.category : category;
+  const categoryChoice = !ai ? "no-ai" : !mismatch ? "agreed" : choice;
 
   async function submit() {
     setBusy(true);
     try {
-      const imageData = await compressImage(file);
       const used = approx ? { lat: roundCoord(pos.lat), lng: roundCoord(pos.lng) } : pos;
       await addDoc(collection(db, "stories"), {
         uid: user.uid,
         authorName: profile?.displayName || user.displayName || "Jomisu user",
-        category,
+        category: finalCategory, // what pins and cards show
+        userCategory: category, // what the user picked
+        aiCategory: ai ? ai.category : null, // what Gemini suggested
+        categoryChoice, // "agreed" | "ai" | "mine" | "no-ai"
+        mediaType: media.isVideo ? "video" : "image",
+        ai: ai
+          ? {
+              otherLabel: ai.otherLabel ?? null,
+              summary: ai.summary,
+              severity: ai.severity,
+              confidence: ai.confidence,
+              sensitiveContent: ai.sensitiveContent,
+              containsFacesOrPlates: ai.containsFacesOrPlates,
+              language: ai.language,
+              placeDetail: ai.placeDetail ?? null,
+            }
+          : null,
         caption: caption.trim().slice(0, 280),
         lat: used.lat,
         lng: used.lng,
         approximate: approx,
-        imageData,                       // small JPEG stored in Firestore (no Cloud Storage needed)
-        status: "Unconfirmed",           // becomes Confirmed/Conflicting once clustering is added
+        imageData: media.still, // one small JPEG (the photo, or the first frame of a video)
+        status: "Unconfirmed", // becomes Confirmed/Conflicting once clustering is added
         createdAt: serverTimestamp(),
         expiresAt: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000), // 24-hour story
       });
@@ -278,37 +424,84 @@ function PostModal({ user, profile, initialPos, onClose, onPosted }) {
     }
   }
 
-  const ready = file && category && pos && !busy;
+  const ready = media && category && pos && !busy && !analysing && !preparing;
+
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal tall" onClick={(e) => e.stopPropagation()}>
         <h3>Post a story</h3>
         {preview && <img className="preview" src={preview} alt="preview" />}
+        {media?.isVideo && <p className="muted">🎬 Video: only the first 5 seconds are used, and one still frame is saved.</p>}
         <label className="primary pick">
-          {file ? "Change photo" : "📷 Take or choose a photo"}
-          <input type="file" accept="image/*" hidden onChange={onPick} />
+          {preparing ? "Reading your file..." : media ? "Change photo or video" : "📷 Take or choose a photo or video"}
+          <input type="file" accept="image/*,video/*" hidden onChange={onPick} />
         </label>
+        {mediaError && <p style={{ color: "#b91c1c" }}>{mediaError}</p>}
 
         <p className="muted">Category</p>
         <div className="cat-grid">
           {CATEGORIES.map((c) => (
-            <button key={c.id} className={category === c.id ? "chip sel" : "chip"} onClick={() => setCategory(c.id)}>
+            <button
+              key={c.id}
+              className={category === c.id ? "chip sel" : "chip"}
+              onClick={() => { setCategory(c.id); setChoice("mine"); }}
+            >
               {c.icon} {c.id}
             </button>
           ))}
         </div>
 
-        <textarea className="field" rows={2} maxLength={280} placeholder="What's happening? (optional)"
-                  value={caption} onChange={(e) => setCaption(e.target.value)} />
+        <textarea
+          className="field" rows={2} maxLength={280} placeholder="What's happening? (optional)"
+          value={caption}
+          onChange={(e) => { setCaption(e.target.value); if (ai) resetAi(); }}
+        />
 
         <label className="toggle">
           <input type="checkbox" checked={approx} onChange={(e) => setApprox(e.target.checked)} />
           Use approximate location (about 500 m)
         </label>
-        <p className="muted">📍 {geoMsg}</p>
-        <p className="muted">Use staged photos only. Automatic blur of faces and plates is added in a later step.</p>
+        {/* Location status is shown only while there is no GPS fix yet (or it failed). */}
+        {!pos && <p className="muted">📍{geoMsg}</p>}
 
-        <button className="primary" disabled={!ready} onClick={submit}>{busy ? "Posting..." : "Post story"}</button>
+        {/* AI result card: shown after "Analyse with AI", before posting */}
+        {ai && (
+          <div style={{ border: "1px solid #d0d7de", borderRadius: 12, padding: 12, margin: "12px 0", background: "#f8fafc" }}>
+            <b>✨ AI analysis</b>
+            <p style={{ margin: "6px 0" }}>{ai.summary}</p>
+            <p className="muted" style={{ margin: "4px 0" }}>
+              {labelOf(ai)} · severity: {ai.severity} · confidence: {Math.round(ai.confidence * 100)}%
+            </p>
+            {ai.placeDetail && <p className="muted" style={{ margin: "4px 0" }}>Place detail: {ai.placeDetail}</p>}
+            {ai.sensitiveContent && <p style={{ margin: "4px 0" }}>⚠️ Possibly sensitive content</p>}
+            {ai.containsFacesOrPlates && (
+              <p style={{ margin: "4px 0" }}>👤 Faces or number plates may be visible (automatic blur comes in a later step)</p>
+            )}
+            {mismatch ? (
+              <>
+                <p style={{ margin: "8px 0 4px" }}>
+                  <b>AI suggests {labelOf(ai)}</b> instead of {iconOf(category)} {category}.
+                </p>
+                <button className={choice === "ai" ? "chip sel" : "chip"} onClick={() => setChoice("ai")}>Use AI's</button>{" "}
+                <button className={choice === "mine" ? "chip sel" : "chip"} onClick={() => setChoice("mine")}>Keep mine</button>
+              </>
+            ) : (
+              <p style={{ margin: "8px 0 0" }}>✓ AI agrees with your category.</p>
+            )}
+          </div>
+        )}
+        {aiError && (
+          <p style={{ color: "#b91c1c" }}>AI analysis failed: {aiError}. You can retry or post without AI tags.</p>
+        )}
+
+        <p className="muted">Use staged photos or videos only. Automatic blur of faces and plates is added in a later step.</p>
+
+        {ai ? (
+          <button className="primary" disabled={!ready} onClick={submit}>{busy ? "Posting..." : "Post story"}</button>
+        ) : (
+          <button className="primary" disabled={!ready} onClick={analyse}>{analysing ? "Analysing..." : "✨ Analyse with AI"}</button>
+        )}
+        {aiError && <button className="link" disabled={!ready} onClick={submit}>Post without AI tags</button>}
         <button className="link" onClick={onClose}>Cancel</button>
       </div>
     </div>
