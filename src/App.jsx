@@ -501,7 +501,7 @@ function PostModal({ user, profile, initialPos, onClose, onPosted }) {
         ) : (
           <button className="primary" disabled={!ready} onClick={analyse}>{analysing ? "Analysing..." : "✨ Analyse with AI"}</button>
         )}
-        {aiError && <button className="link" disabled={!ready} onClick={submit}>Post without AI tags</button>}
+        {!ai && <button className="link" disabled={!ready} onClick={submit}>{busy ? "Posting..." : "Post now without AI"}</button>}
         <button className="link" onClick={onClose}>Cancel</button>
       </div>
     </div>
