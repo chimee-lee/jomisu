@@ -121,8 +121,8 @@ function MapScreen({ active, stories, onPinTap, onLocated }) {
       {noneNearby && (
         <div className="banner">
           No stories nearby.{" "}
-          <button onClick={() => mapRef.current.setView(PENANG_BRIDGE, 13)}>
-            View demo stories at Penang Bridge
+          <button onClick={() => mapRef.current.setView([5.38, 100.3], 11)}>
+            View Penang demo stories
           </button>
         </div>
       )}
@@ -258,12 +258,12 @@ function StoryCard({ story, userPos, user, onNeedSignIn }) {
     <div className="card">
       <StoryImage story={story} />
       <div>
-        <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.status} />
+        <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.demo ? "🧪 Demo" : story.status} />
         {story.ai && <SeverityPill severity={story.ai.severity} />}
         {story.ai?.summary && <p style={{ margin: "4px 0" }}>✨ {story.ai.summary}</p>}
         <p className="muted">
           {story.caption || "No caption"}<br />
-          {timeAgo(story.createdMs)} · {story.authorName}
+          {story.demo ? "Demo story" : timeAgo(story.createdMs)} · {story.authorName}
           {km !== null && ` · ${km < 1 ? Math.round(km * 1000) + " m" : km.toFixed(1) + " km"} away`}
           {story.approximate && " · approximate location"}
         </p>
@@ -282,7 +282,7 @@ function PinModal({ story, onClose }) {
         <StoryImage story={story} big />
         <h3>{iconFor(story.category)} {categoryLabel(story)}</h3>
         <p>
-          <Badge status={story.status} />
+          <Badge status={story.demo ? "🧪 Demo" : story.status} />
           {story.ai && <SeverityPill severity={story.ai.severity} />}
         </p>
         {story.ai?.summary && <p>✨ {story.ai.summary}</p>}
@@ -290,7 +290,7 @@ function PinModal({ story, onClose }) {
         {aiDisagreed && <p className="muted">AI suggested: {iconFor(story.aiCategory)} {story.aiCategory}</p>}
         <p>{story.caption || "No caption"}</p>
         <p className="muted">
-          {timeAgo(story.createdMs)} · {story.authorName}
+          {story.demo ? "Demo story" : timeAgo(story.createdMs)} · {story.authorName}
           {story.approximate && " · approximate location"}
         </p>
         <button className="link" onClick={onClose}>Close</button>
