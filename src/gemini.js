@@ -1,5 +1,6 @@
 // src/gemini.js
 // Gemini story analysis via Firebase AI Logic (Gemini Developer API, free tier).
+// Tries the main model first; if it is overloaded or too slow, switches to a lighter model.
 import { CATEGORIES as CATEGORY_LIST } from "./categories";
 import { getAI, getGenerativeModel, GoogleAIBackend, Schema } from "firebase/ai";
 import { app } from "./firebase";
@@ -24,20 +25,52 @@ const schema = Schema.object({
   optionalProperties: ["otherLabel", "placeDetail"],
 });
 
+// ---------- Models ----------
+const PRIMARY_MODEL = "gemini-3.8-flash"; // best quality
+const FALLBACK_MODEL = "gemini-3.5-flash-lite"; // lighter, used when the primary is busy or slow
+const PRIMARY_TIMEOUT_MS = 20000; // a healthy reply takes seconds; 20 s means it's overloaded
+const FALLBACK_TIMEOUT_MS = 30000;
+
 const ai = getAI(app, { backend: new GoogleAIBackend() });
-const model = getGenerativeModel(
-  ai,
-  {
-    model: "gemini-3.8-flash",
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      // Low thinking: much faster for a simple photo-classification job.
-      thinkingConfig: { thinkingLevel: "LOW" },
+
+function makeModel(name, lowThinking, timeoutMs) {
+  return getGenerativeModel(
+    ai,
+    {
+      model: name,
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: schema,
+        // Low thinking: much faster for a simple photo-classification job.
+        ...(lowThinking ? { thinkingConfig: { thinkingLevel: "LOW" } } : {}),
+      },
     },
-  },
-  { timeout: 45000 } // give up after 45 s instead of the 3-minute default
-);
+    { timeout: timeoutMs }
+  );
+}
+
+const primary = makeModel(PRIMARY_MODEL, true, PRIMARY_TIMEOUT_MS);
+const fallback = makeModel(FALLBACK_MODEL, false, FALLBACK_TIMEOUT_MS);
+
+// Retry plan: primary first, then the fallback after a short pause.
+// Testing aid: open the app with ?ailite in the URL to go straight to the fallback model.
+function retryPlan() {
+  const forceLite = typeof location !== "undefined" && new URLSearchParams(location.search).has("ailite");
+  if (forceLite) return [{ model: fallback, waitMs: 0 }];
+  return [
+    { model: primary, waitMs: 0 },
+    { model: fallback, waitMs: 1000, status: "AI is busy, trying a lighter AI model…" },
+  ];
+}
+
+// Temporary server-side problems worth trying another model for: overload, rate limit, timeout.
+const isTimeout = (err) => /abort|timed? ?out/i.test(String(err?.message || err));
+function isRetryable(err) {
+  const msg = String(err?.message || err);
+  return isTimeout(err) || /high demand|overloaded|unavailable|resource.?exhausted|\[(429|500|503)\b/i.test(msg);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PROMPT = `You analyse one community report about something happening at a place.
 The media is either one photo, or several frames sampled in order from the first 5 seconds of a short video.
@@ -64,21 +97,41 @@ async function toInlineData(img) {
 
 /**
  * Analyse a story before posting.
- * @param frames  array of images: one photo, or frames from a video
- * @param isVideo true if the frames came from a video
+ * @param frames   array of images: one photo, or frames from a video
+ * @param isVideo  true if the frames came from a video
+ * @param caption  the user's caption (optional)
+ * @param onStatus optional callback that shows retry progress text in the UI
  */
-export async function analyseStory({ frames, isVideo, caption }) {
+export async function analyseStory({ frames, isVideo, caption, onStatus }) {
   const parts = [
     PROMPT,
     `Media: ${isVideo ? `${frames.length} frames from a video` : "one photo"}\nCaption: ${caption || "(none)"}`,
   ];
   for (const f of frames) parts.push({ inlineData: await toInlineData(f) });
-  let result;
-  try {
-    result = await model.generateContent(parts);
-  } catch (err) {
-    if (/abort/i.test(String(err?.message))) throw new Error("The AI took longer than 45 seconds");
-    throw err;
+
+  let lastErr;
+  for (const step of retryPlan()) {
+    if (step.waitMs) {
+      onStatus?.(step.status);
+      await sleep(step.waitMs);
+    }
+    try {
+      const t0 = Date.now();
+      const result = await step.model.generateContent(parts);
+      console.info(`Gemini replied in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+      onStatus?.("");
+      return JSON.parse(result.response.text());
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err)) throw err; // a real error (bad input, auth): don't retry
+      console.warn("Gemini busy or slow, moving to next attempt:", err?.message);
+    }
   }
-  return JSON.parse(result.response.text());
+  onStatus?.("");
+  // Short, readable message instead of the raw URL error.
+  throw new Error(
+    isTimeout(lastErr)
+      ? "The AI is responding slowly right now. Please retry in a minute"
+      : "The AI service is busy right now. Please retry in a minute"
+  );
 }
