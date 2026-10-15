@@ -15,13 +15,14 @@ import { distanceKm, roundCoord, timeAgo } from "./geo";
 
 const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is found
 const PENANG_BRIDGE = [5.3565, 100.352];
-const STATUS_COLOR = { Unconfirmed: "#f59e0b", Confirmed: "#22a45d", Conflicting: "#8e44ad" };
 
 // Cloud Run backend (api/ folder). Ask a Place questions go here; Gemini runs on Vertex AI.
 const API_URL = "https://jomisu-api-236629246156.asia-southeast1.run.app";
 
-// Ask a Place confidence colours: yellow -> orange -> red as more stories agree.
+// Confirmation levels: yellow -> orange -> red as more stories report the same incident.
+// Used for map dots, story badges and Ask a Place incidents.
 const CONFIDENCE_COLOR = { Unconfirmed: "#eab308", Likely: "#f97316", Confirmed: "#dc2626" };
+const STATUS_COLOR = CONFIDENCE_COLOR;
 
 // ---------- Helpers ----------
 // First emoji typed on the phone's native emoji keyboard, or null.
@@ -226,8 +227,16 @@ function ReactionBar({ story, user, onNeedSignIn }) {
 }
 
 // ---------- Story pieces ----------
-function Badge({ status }) {
-  return <span className="badge">{status}</span>;
+// Confirmation level badge, coloured like the map dot. Demo stories get an extra "Demo" tag.
+function Badge({ status, demo }) {
+  return (
+    <>
+      <span className="badge" style={{ background: STATUS_COLOR[status] || "#6b7280", color: "#fff" }}>
+        {status || "Unconfirmed"}
+      </span>
+      {demo && <span className="badge" style={{ marginLeft: 4 }}>🧪 Demo</span>}
+    </>
+  );
 }
 
 // Severity colours for the small pill on cards.
@@ -297,7 +306,7 @@ function StoryCard({ story, userPos, user, onNeedSignIn }) {
     <div className="card">
       <StoryImage story={story} />
       <div>
-        <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.demo ? "🧪 Demo" : story.status} />
+        <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.status} demo={story.demo} />
         {story.ai && <SeverityPill severity={story.ai.severity} />}
         {story.ai?.summary && <p style={{ margin: "4px 0" }}>✨ {story.ai.summary}</p>}
         <p className="muted">
@@ -321,7 +330,7 @@ function PinModal({ story, onClose }) {
         <StoryImage story={story} big />
         <h3>{iconFor(story.category)} {categoryLabel(story)}</h3>
         <p>
-          <Badge status={story.demo ? "🧪 Demo" : story.status} />
+          <Badge status={story.status} demo={story.demo} />
           {story.ai && <SeverityPill severity={story.ai.severity} />}
         </p>
         {story.ai?.summary && <p>✨ {story.ai.summary}</p>}

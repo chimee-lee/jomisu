@@ -19,8 +19,8 @@ MIN_AREA_RADIUS_M = 500     # a single building still gets a 500 m search area
 MAX_AREA_RADIUS_M = 15000   # stops country-sized searches
 
 # ---- Safety-net list ----
-# Bridge points run island -> mainland, so KM 0 = island end.
-# APPROXIMATE coordinates: verify each in Google Maps before the demo.
+# Bridge points run island -> mainland, so KM 0 = island end of the bridge.
+# Bridge lines come from OpenStreetMap (bridge_points.py, 15 Oct 2026), checked on a map.
 KNOWN_PLACES = [
     # Second Bridge is listed first so "second bridge" never matches "Penang Bridge"
     {
@@ -28,14 +28,16 @@ KNOWN_PLACES = [
         "aliases": ["penang second bridge", "second bridge", "2nd bridge", "sultan abdul halim",
                     "jambatan kedua"],
         "kind": "route",
-        "points": [(5.2850, 100.2950), (5.2550, 100.3500), (5.2480, 100.4100)],
+        "points": [(5.29117, 100.29528), (5.27656, 100.31903), (5.26106, 100.33847), (5.2544, 100.35713),
+                   (5.24754, 100.37789), (5.23279, 100.3958), (5.22535, 100.41394), (5.2291, 100.43371)],
         "corridor_m": 500,
     },
     {
         "name": "Penang Bridge",
         "aliases": ["penang bridge", "first bridge", "1st bridge", "jambatan pulau pinang"],
         "kind": "route",
-        "points": [(5.3555, 100.3120), (5.3540, 100.3500), (5.3640, 100.3880)],
+        "points": [(5.35889, 100.31703), (5.35669, 100.32894), (5.35523, 100.3384), (5.35371, 100.34823),
+                   (5.3523, 100.35771), (5.35137, 100.36694), (5.35216, 100.37685), (5.35363, 100.38817)],
         "corridor_m": 500,
     },
     {"name": "Gurney", "aliases": ["gurney"], "kind": "area",
