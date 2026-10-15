@@ -17,6 +17,12 @@ const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is foun
 const PENANG_BRIDGE = [5.3565, 100.352];
 const STATUS_COLOR = { Unconfirmed: "#f59e0b", Confirmed: "#22a45d", Conflicting: "#8e44ad" };
 
+// Cloud Run backend (api/ folder). Ask a Place questions go here; Gemini runs on Vertex AI.
+const API_URL = "https://jomisu-api-236629246156.asia-southeast1.run.app";
+
+// Ask a Place confidence colours: yellow -> orange -> red as more stories agree.
+const CONFIDENCE_COLOR = { Unconfirmed: "#eab308", Likely: "#f97316", Confirmed: "#dc2626" };
+
 // ---------- Helpers ----------
 // First emoji typed on the phone's native emoji keyboard, or null.
 const EMOJI_RE = /^(\p{Extended_Pictographic}|\p{Regional_Indicator})/u;
@@ -41,11 +47,13 @@ async function ensureUserDoc(user) {
 }
 
 // ---------- Map screen ----------
-function MapScreen({ active, stories, onPinTap, onLocated }) {
+function MapScreen({ active, stories, onPinTap, onLocated, focus }) {
   const mapDiv = useRef(null);
   const mapRef = useRef(null);
   const meRef = useRef(null);
   const pinsRef = useRef(null);
+  const focusShapeRef = useRef(null); // outline of the place being asked about
+  const fittedRef = useRef(null); // the focus we already zoomed to (zoom once per question)
   const [status, setStatus] = useState("Finding your location...");
   const [me, setMe] = useState(null);
 
@@ -112,6 +120,37 @@ function MapScreen({ active, stories, onPinTap, onLocated }) {
   useEffect(() => {
     if (active && mapRef.current) setTimeout(() => mapRef.current.invalidateSize(), 100);
   }, [active]);
+
+  // Ask a Place: outline the place (circle for areas, line for bridges) and zoom to show all of it.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (focusShapeRef.current) {
+      focusShapeRef.current.remove();
+      focusShapeRef.current = null;
+    }
+    if (!focus) {
+      fittedRef.current = null;
+      return;
+    }
+    const style = { color: "#1e88e5", dashArray: "8 6", fillOpacity: 0.06 };
+    const shape =
+      focus.kind === "route"
+        ? L.polyline(focus.points, { ...style, weight: 8, opacity: 0.5 })
+        : L.circle(focus.center, { ...style, weight: 3, radius: focus.radius_m });
+    shape.addTo(map);
+    shape.bringToBack(); // keep story pins clickable on top of the outline
+    focusShapeRef.current = shape;
+
+    // Zoom only while the map is visible (a hidden map has no size), and only once per question.
+    if (active && fittedRef.current !== focus) {
+      fittedRef.current = focus;
+      setTimeout(() => {
+        map.invalidateSize();
+        map.fitBounds(shape.getBounds(), { padding: [40, 40] });
+      }, 150);
+    }
+  }, [focus, active]);
 
   const noneNearby = me && !stories.some((s) => distanceKm(me, s) <= 5);
 
@@ -522,15 +561,108 @@ function SignInModal({ onClose, onSignIn }) {
   );
 }
 
-// Ask a Place card: layout only for now; Gemini fills it in a later step.
-function AskCard({ query, onClose }) {
+// Send a question to the Cloud Run /ask endpoint. Returns { place, summary, incidents, storyIds }.
+async function askPlace(question, userPos) {
+  const res = await fetch(`${API_URL}/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, ...(userPos || {}) }), // GPS is only used for "near me"
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || data.error || `Server error ${res.status}`);
+  return data;
+}
+
+function ConfidencePill({ level }) {
   return (
-    <div className="ask">
+    <span
+      style={{
+        background: CONFIDENCE_COLOR[level] || "#6b7280", color: "#fff",
+        borderRadius: 10, padding: "1px 8px", fontSize: 12, whiteSpace: "nowrap",
+      }}
+    >
+      {level}
+    </span>
+  );
+}
+
+// Ask a Place card: Gemini summary, grouped incidents, then the matching stories.
+// Mounted with a new key per question, so each question fetches exactly once.
+function AskCard({ query, userPos, stories, onPlace, onOpenStory, onClose }) {
+  const [state, setState] = useState({ loading: true });
+
+  useEffect(() => {
+    let cancelled = false; // ignore a late answer if the card was closed
+    askPlace(query, userPos)
+      .then((data) => {
+        if (cancelled) return;
+        setState({ data, at: new Date() });
+        if (data.place) onPlace(data.place); // map outlines and zooms to the place
+      })
+      .catch((err) => !cancelled && setState({ error: err.message }));
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line
+
+  const { loading, error, data, at } = state;
+  // Story objects for the IDs Gemini used (only those still in the live list).
+  const matched = (data?.storyIds || []).map((id) => stories.find((s) => s.id === id)).filter(Boolean);
+
+  return (
+    <div className="ask" style={{ maxHeight: "60vh", overflowY: "auto" }}>
       <button className="x" onClick={onClose} aria-label="Close">✕</button>
       <p className="muted">🔍 "{query}"</p>
-      <b>🤖 Gemini Place Intelligence Summary</b>
-      <p>Layout preview. The real answer from Gemini arrives in a later step.</p>
-      <p className="muted">🕒 Updated — · Confidence: — (verified by N posts)</p>
+      <b>🤖 Gemini Place Intelligence{data?.place ? ` · ${data.place.name}` : ""}</b>
+
+      {loading && <p>Asking Gemini about this place...</p>}
+      {error && <p style={{ color: "#b91c1c" }}>Couldn't answer: {error}</p>}
+
+      {data && (
+        <>
+          <p style={{ margin: "6px 0" }}>{data.summary}</p>
+
+          {data.incidents?.map((inc, i) => (
+            <div key={i} style={{ borderTop: "1px solid #e5e7eb", padding: "6px 0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <span>{iconFor(inc.category)} <b>{inc.title}</b></span>
+                <ConfidencePill level={inc.confidence} />
+              </div>
+              <span className="muted">
+                📍 {inc.location_hint} · {inc.story_ids.length} post{inc.story_ids.length === 1 ? "" : "s"}
+              </span>
+            </div>
+          ))}
+
+          <p className="muted" style={{ margin: "6px 0" }}>
+            🕒 Updated {at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            {" · "}Based on {data.storyIds.length} live stor{data.storyIds.length === 1 ? "y" : "ies"}
+          </p>
+
+          {matched.length > 0 && (
+            <>
+              <b>Live community stories here</b>
+              <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "6px 0" }}>
+                {matched.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => onOpenStory(s)}
+                    style={{ border: 0, background: "none", padding: 0, width: 84, flex: "0 0 auto", textAlign: "left" }}
+                  >
+                    <img
+                      src={s.imageData}
+                      alt=""
+                      style={{
+                        width: 84, height: 84, objectFit: "cover", borderRadius: 10,
+                        filter: s.ai?.sensitiveContent ? "blur(10px)" : "none", // sensitive stays blurred
+                      }}
+                    />
+                    <span style={{ fontSize: 11, display: "block" }}>{iconFor(s.category)} {s.category}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -604,7 +736,8 @@ export default function App() {
   const [userPos, setUserPos] = useState(null);
   const [stories, setStories] = useState([]);
   const [query_, setQuery] = useState("");
-  const [asked, setAsked] = useState("");
+  const [asked, setAsked] = useState(null); // { text, id } of the current question
+  const [askFocus, setAskFocus] = useState(null); // place returned by /ask, outlined on the map
 
   // Keep user + Firestore profile in sync with Firebase Auth.
   useEffect(() => {
@@ -671,9 +804,18 @@ export default function App() {
     if (!user) return setShowSignIn(true);
     setShowPost(true);
   }
+  // Ask a Place: a new id per submit, so asking the same question again re-fetches.
   function onSearch(e) {
     e.preventDefault();
-    if (query_.trim()) setAsked(query_.trim());
+    const text = query_.trim();
+    if (!text) return;
+    setAskFocus(null);
+    setAsked({ text, id: Date.now() });
+    setTab("maps"); // show the whole place and its dots on the map
+  }
+  function closeAsk() {
+    setAsked(null);
+    setAskFocus(null);
   }
 
   const showTopBar = ["feed", "maps", "stories"].includes(tab);
@@ -690,7 +832,8 @@ export default function App() {
 
       <div className="screen">
         <div style={{ display: tab === "maps" ? "block" : "none", height: "100%" }}>
-          <MapScreen active={tab === "maps"} stories={liveStories} onPinTap={setPin} onLocated={setUserPos} />
+          <MapScreen active={tab === "maps"} stories={liveStories} onPinTap={setPin} onLocated={setUserPos}
+                     focus={askFocus} />
         </div>
         {tab === "feed" && <Placeholder title="Feed" text="Credible news from the last 24 hours: coming soon." />}
         {tab === "stories" && (
@@ -706,7 +849,10 @@ export default function App() {
         {tab === "profile" && (
           <Profile user={user} profile={profile} onSignIn={handleSignIn} onSaveName={saveName} />
         )}
-        {showTopBar && asked && <AskCard query={asked} onClose={() => setAsked("")} />}
+        {showTopBar && asked && (
+          <AskCard key={asked.id} query={asked.text} userPos={userPos} stories={liveStories}
+                   onPlace={setAskFocus} onOpenStory={setPin} onClose={closeAsk} />
+        )}
       </div>
 
       <nav className="nav">
