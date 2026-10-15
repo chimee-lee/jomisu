@@ -2,3 +2,5 @@ flask
 flask-cors
 gunicorn
 google-genai
+google-cloud-firestore
+requests
