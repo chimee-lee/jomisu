@@ -55,7 +55,7 @@ flowchart LR
   U[Phone browser] -->|React app| H[Firebase Hosting]
   U -->|sign in| A[Firebase Auth]
   U <-->|live stories, reactions| F[(Cloud Firestore)]
-  U -->|photo/video frames, "Ask a Place" question| R[Cloud Run API]
+  U -->|photo or video frames and Ask a Place questions| R[Cloud Run API]
   R -->|read stories in the place| F
   R -->|tags, place, summary, incidents| G2[Gemini on Vertex AI]
   U -.->|backup: photo analysis| G1[Gemini via Firebase AI Logic]
