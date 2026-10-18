@@ -11,11 +11,13 @@ import { CATEGORIES, iconFor } from "./categories";
 import { compressImage } from "./media";
 import { analyseStory } from "./gemini";
 import { extractVideoFrames } from "./video";
-import { bridgeLabel, cachedArea, distanceKm, formatKm, lookupArea, roundCoord, timeAgo } from "./geo";
+import { bridgeLabel, cachedArea, distanceKm, dotPosition, formatKm, lookupArea, roundCoord, timeAgo } from "./geo";
 import "./StoryViewer.css";
 
 const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is found
 const PENANG_BRIDGE = [5.3565, 100.352];
+const PENANG_DEMO_CENTER = [5.33, 100.34]; // fallback if no demo stories are loaded yet
+const WELCOME_KEY = "jomisu-welcome-seen-v1";
 
 // Cloud Run backend (api/ folder). Ask a Place questions go here; Gemini runs on Vertex AI.
 const API_URL = "https://jomisu-api-236629246156.asia-southeast1.run.app";
@@ -44,13 +46,15 @@ function groupIncidents(stories) {
       // Fallback: join a nearby, recent group that has no incidentId either.
       g = groups.find(
         (x) => !x.incidentId
-          && distanceKm(x, s) <= FALLBACK_RADIUS_KM
+          && distanceKm(x.stories[0], s) <= FALLBACK_RADIUS_KM
           && x.stories[0].createdMs - s.createdMs <= FALLBACK_WINDOW_MS
       );
     }
     if (!g) {
-      // First (= newest) story of the group: the dot sits at its spot.
-      g = { id: s.incidentId || s.id, incidentId: s.incidentId || null, stories: [], lat: s.lat, lng: s.lng };
+      // First (= newest) story of the group: the dot sits at its spot (snapped onto the bridge road
+      // if it's on a bridge). Grouping still measures from the story's real spot.
+      const dot = dotPosition(s.lat, s.lng);
+      g = { id: s.incidentId || s.id, incidentId: s.incidentId || null, stories: [], lat: dot.lat, lng: dot.lng };
       groups.push(g);
       if (s.incidentId) byIncident[s.incidentId] = g;
     }
@@ -104,6 +108,32 @@ function MapScreen({ active, stories, incidents, onPinTap, onLocated, focus }) {
   const fittedRef = useRef(null); // the focus we already zoomed to (zoom once per question)
   const [status, setStatus] = useState("Finding your location...");
   const [me, setMe] = useState(null);
+  const showingDemoRef = useRef(false); // true = don't jump back to the user when GPS arrives
+  const [welcome, setWelcome] = useState(() => {
+    try { return !localStorage.getItem(WELCOME_KEY); } catch { return true; }
+  });
+
+  // Fly to the Penang demo: zoom to fit every demo dot (bridge + Gurney).
+  function showDemo() {
+    const map = mapRef.current;
+    showingDemoRef.current = true;
+    const demo = incidents.filter((g) => g.stories.some((s) => s.demo));
+    if (demo.length) map.flyToBounds(L.latLngBounds(demo.map((g) => [g.lat, g.lng])), { padding: [50, 50], duration: 1.5 });
+    else map.flyTo(PENANG_DEMO_CENTER, 11, { duration: 1.5 });
+  }
+
+  // Close the first-visit welcome card (remembered in this browser).
+  function closeWelcome(goDemo) {
+    try { localStorage.setItem(WELCOME_KEY, "1"); } catch { /* private mode: show again next time */ }
+    setWelcome(false);
+    if (goDemo) showDemo();
+  }
+
+  // 📍 button: always go back to the user.
+  function onLocateTap() {
+    showingDemoRef.current = false;
+    locateMe();
+  }
 
   // Locate the user: fast/approximate first, then precise.
   function locateMe() {
@@ -116,7 +146,8 @@ function MapScreen({ active, stories, incidents, onPinTap, onLocated, focus }) {
       meRef.current = L.circleMarker([latitude, longitude], {
         radius: 9, color: "#fff", weight: 3, fillColor: "#1e88e5", fillOpacity: 1,
       }).addTo(map);
-      map.setView([latitude, longitude], 15);
+      // Don't yank the map away if the viewer is already looking at the Penang demo.
+      if (!showingDemoRef.current) map.setView([latitude, longitude], 15);
       setMe({ lat: latitude, lng: longitude });
       onLocated({ lat: latitude, lng: longitude });
       setStatus(`You are here (accuracy about ${Math.round(accuracy)} m)`);
@@ -202,16 +233,34 @@ function MapScreen({ active, stories, incidents, onPinTap, onLocated, focus }) {
   return (
     <div className="map-screen">
       <div ref={mapDiv} className="map" />
-      {noneNearby && (
+      {noneNearby && !welcome && (
         <div className="banner">
           No stories nearby.{" "}
-          <button onClick={() => mapRef.current.setView([5.38, 100.3], 11)}>
-            View Penang demo stories
-          </button>
+          <button onClick={showDemo}>View Penang demo stories</button>
         </div>
       )}
       <div className="status">{status}</div>
-      <button className="locate" onClick={locateMe} aria-label="Show my location">📍</button>
+
+      {/* Always-visible shortcut to the demo (for judges anywhere in the world) */}
+      <button className="demo-btn" onClick={showDemo} aria-label="Show Penang demo">🇲🇾 Demo</button>
+      <button className="locate" onClick={onLocateTap} aria-label="Show my location">📍</button>
+
+      {/* First visit: prove location works AND point to the demo */}
+      {welcome && (
+        <div className="welcome">
+          <h3>👋 Welcome to Jomisu</h3>
+          <p>See what's happening at any place right now, before it reaches the news.</p>
+          <p className="welcome-loc">
+            {me ? "✅ " : "📍 "}{status}
+          </p>
+          <p className="muted">
+            Our live demo stories are in <b>Penang, Malaysia</b>: an accident on the Second Bridge
+            and events at Gurney. Tap 🇲🇾 Demo or 📍 any time to switch.
+          </p>
+          <button className="primary" onClick={() => closeWelcome(true)}>🗺️ Show me the Penang demo</button>
+          <button className="link" onClick={() => closeWelcome(false)}>Stay at my location</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import { BRIDGE_LINES } from "./bridges.js";
+
 // ---------- Distance and time helpers ----------
 
 // Distance in km between two {lat, lng} points (haversine formula).
@@ -26,32 +28,22 @@ export function timeAgo(ms) {
 // "850 m" or "6.8 km".
 export const formatKm = (km) => (km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`);
 
-// ---------- Bridges: "Second Bridge · KM 6" labels ----------
-// Same lines as api/geo.py (island end first, so KM 0 = island end).
-const BRIDGES = [
-  {
-    label: "Second Bridge",
-    points: [[5.29117, 100.29528], [5.27656, 100.31903], [5.26106, 100.33847], [5.2544, 100.35713],
-             [5.24754, 100.37789], [5.23279, 100.3958], [5.22535, 100.41394], [5.2291, 100.43371]],
-  },
-  {
-    label: "Penang Bridge",
-    points: [[5.35889, 100.31703], [5.35669, 100.32894], [5.35523, 100.3384], [5.35371, 100.34823],
-             [5.3523, 100.35771], [5.35137, 100.36694], [5.35216, 100.37685], [5.35363, 100.38817]],
-  },
-];
-const BRIDGE_CORRIDOR_M = 400; // a story this close to a bridge line counts as "on the bridge"
+// ---------- Bridges: "Second Bridge · KM 6" labels and on-the-road dots ----------
+// Lines live in bridges.js (detailed real roads from OpenStreetMap; island end = KM 0).
 
-// Distance (m) from a point to a line, and how far along the line (km) the closest spot is.
+// A story this close to a bridge line counts as "on the bridge". Covers GPS drift and
+// "approximate location" (rounded to ~550 m grid, so up to ~390 m off).
+const BRIDGE_CORRIDOR_M = 400;
+
+// Nearest spot on a line: distance to it (m), how far along the line it is (km), and its lat/lng.
 // Same maths as route_position() in api/geo.py: flatten to metres, project onto each segment.
 function routePosition(lat, lng, line) {
   const [refLat, refLng] = line[0];
-  const xy = ([la, ln]) => [
-    (ln - refLng) * 111320 * Math.cos((refLat * Math.PI) / 180),
-    (la - refLat) * 110540,
-  ];
+  const kx = 111320 * Math.cos((refLat * Math.PI) / 180); // metres per degree of longitude
+  const ky = 110540;                                       // metres per degree of latitude
+  const xy = ([la, ln]) => [(ln - refLng) * kx, (la - refLat) * ky];
   const [px, py] = xy([lat, lng]);
-  let best = Infinity, bestAlong = 0, walked = 0;
+  let best = Infinity, bestAlong = 0, bestX = 0, bestY = 0, walked = 0;
   for (let i = 0; i < line.length - 1; i++) {
     const [ax, ay] = xy(line[i]);
     const [bx, by] = xy(line[i + 1]);
@@ -59,20 +51,40 @@ function routePosition(lat, lng, line) {
     const seg = Math.hypot(dx, dy);
     // t = how far along this segment the closest point is (0 = start, 1 = end)
     const t = seg === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / seg ** 2));
-    const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-    if (d < best) { best = d; bestAlong = walked + t * seg; }
+    const x = ax + t * dx, y = ay + t * dy;
+    const d = Math.hypot(px - x, py - y);
+    if (d < best) { best = d; bestAlong = walked + t * seg; bestX = x; bestY = y; }
     walked += seg;
   }
-  return { distM: best, km: bestAlong / 1000 };
+  return {
+    distM: best,
+    km: bestAlong / 1000,
+    lat: refLat + bestY / ky, // turn the flat x/y back into lat/lng
+    lng: refLng + bestX / kx,
+  };
+}
+
+// The bridge a point is on (closest one inside the corridor), or null.
+function onBridge(lat, lng) {
+  let hit = null;
+  for (const b of BRIDGE_LINES) {
+    const pos = routePosition(lat, lng, b.points);
+    if (pos.distM <= BRIDGE_CORRIDOR_M && (!hit || pos.distM < hit.distM)) hit = { ...pos, label: b.label };
+  }
+  return hit;
 }
 
 // "Second Bridge · KM 6" if the point is on a bridge, otherwise null.
 export function bridgeLabel(lat, lng) {
-  for (const b of BRIDGES) {
-    const { distM, km } = routePosition(lat, lng, b.points);
-    if (distM <= BRIDGE_CORRIDOR_M) return `${b.label} · KM ${Math.round(km)}`;
-  }
-  return null;
+  const hit = onBridge(lat, lng);
+  return hit ? `${hit.label} · KM ${Math.round(hit.km)}` : null;
+}
+
+// Where to draw a map dot: on the bridge road if the story is on a bridge, else where it is.
+// (Only the dot moves; the story's saved location is never changed.)
+export function dotPosition(lat, lng) {
+  const hit = onBridge(lat, lng);
+  return hit ? { lat: hit.lat, lng: hit.lng } : { lat, lng };
 }
 
 // ---------- Area names ("Bayan Lepas", "Gelugor") from OpenStreetMap ----------
