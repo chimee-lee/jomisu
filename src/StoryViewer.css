@@ -1,0 +1,73 @@
+/* ---------- Map: one round dot per incident, with the number of posts ---------- */
+.inc-dot {
+  width: 30px;
+  height: 30px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font: 700 13px/24px system-ui, sans-serif;
+  text-align: center;
+}
+
+/* ---------- Stories list: whole card is tappable ---------- */
+.card.tappable { cursor: pointer; }
+.card.tappable:active { background: #f3f4f6; }
+.place-line { color: #374151; }
+
+/* ---------- Story viewer: swipe left/right between stories of one incident ---------- */
+.modal.viewer { overflow-x: hidden; }
+
+.viewer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+/* Horizontal track; each slide snaps to full width (native swipe on phones). */
+.viewer-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  align-items: flex-start;
+}
+.viewer-track::-webkit-scrollbar { display: none; }
+
+.viewer-slide {
+  flex: 0 0 100%;
+  min-width: 0;
+  scroll-snap-align: start;
+  scroll-snap-stop: always; /* one story per swipe */
+  box-sizing: border-box;
+}
+
+/* Whole photo, never cropped: dark bars fill any leftover space. */
+.viewer-slide .thumb.big {
+  width: 100%;
+  height: auto;
+  background: #111827;
+  border-radius: 12px;
+}
+
+.viewer-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+}
+.viewer-nav button:disabled { opacity: 0.35; }
+
+.viewer-dots i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: #d1d5db;
+}
+.viewer-dots i.on { background: #dc2626; }

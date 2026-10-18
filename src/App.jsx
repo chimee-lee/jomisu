@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
@@ -11,7 +11,8 @@ import { CATEGORIES, iconFor } from "./categories";
 import { compressImage } from "./media";
 import { analyseStory } from "./gemini";
 import { extractVideoFrames } from "./video";
-import { distanceKm, roundCoord, timeAgo } from "./geo";
+import { bridgeLabel, cachedArea, distanceKm, formatKm, lookupArea, roundCoord, timeAgo } from "./geo";
+import "./StoryViewer.css";
 
 const DEFAULT_CENTER = [5.39, 100.33]; // used only until the user's GPS is found
 const PENANG_BRIDGE = [5.3565, 100.352];
@@ -23,6 +24,52 @@ const API_URL = "https://jomisu-api-236629246156.asia-southeast1.run.app";
 // Used for map dots, story badges and Ask a Place incidents.
 const CONFIDENCE_COLOR = { Unconfirmed: "#eab308", Likely: "#f97316", Confirmed: "#dc2626" };
 const STATUS_COLOR = CONFIDENCE_COLOR;
+
+// ---------- Incidents: one map dot per incident ----------
+// Stories with the same incidentId are one incident (set by Gemini grouping / the demo seed).
+// Stories without one fall back to a simple rule: within 300 m and 3 hours of each other.
+const FALLBACK_RADIUS_KM = 0.3;
+const FALLBACK_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+// Level from the number of posts: 1 = Unconfirmed, 2 = Likely, 3+ = Confirmed.
+const levelFor = (count) => (count >= 3 ? "Confirmed" : count === 2 ? "Likely" : "Unconfirmed");
+
+// stories (newest first) -> [{ id, stories (newest first), lat, lng, level }]
+function groupIncidents(stories) {
+  const groups = [];
+  const byIncident = {};
+  for (const s of stories) {
+    let g = s.incidentId ? byIncident[s.incidentId] : null;
+    if (!g && !s.incidentId) {
+      // Fallback: join a nearby, recent group that has no incidentId either.
+      g = groups.find(
+        (x) => !x.incidentId
+          && distanceKm(x, s) <= FALLBACK_RADIUS_KM
+          && x.stories[0].createdMs - s.createdMs <= FALLBACK_WINDOW_MS
+      );
+    }
+    if (!g) {
+      // First (= newest) story of the group: the dot sits at its spot.
+      g = { id: s.incidentId || s.id, incidentId: s.incidentId || null, stories: [], lat: s.lat, lng: s.lng };
+      groups.push(g);
+      if (s.incidentId) byIncident[s.incidentId] = g;
+    }
+    g.stories.push(s);
+  }
+  groups.forEach((g) => { g.level = levelFor(g.stories.length); });
+  return groups;
+}
+
+// Round map dot with the number of posts inside (blank for a single post).
+function incidentIcon(group) {
+  const n = group.stories.length;
+  return L.divIcon({
+    className: "", // drop Leaflet's default white square
+    html: `<div class="inc-dot" style="background:${CONFIDENCE_COLOR[group.level]}">${n > 1 ? n : ""}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15], // centre of the dot sits exactly on the story's spot
+  });
+}
 
 // ---------- Helpers ----------
 // First emoji typed on the phone's native emoji keyboard, or null.
@@ -48,7 +95,7 @@ async function ensureUserDoc(user) {
 }
 
 // ---------- Map screen ----------
-function MapScreen({ active, stories, onPinTap, onLocated, focus }) {
+function MapScreen({ active, stories, incidents, onPinTap, onLocated, focus }) {
   const mapDiv = useRef(null);
   const mapRef = useRef(null);
   const meRef = useRef(null);
@@ -103,19 +150,16 @@ function MapScreen({ active, stories, onPinTap, onLocated, focus }) {
     locateMe();
   }, []); // eslint-disable-line
 
-  // Redraw story pins whenever the live story list changes.
+  // Redraw one dot per incident whenever the live story list changes.
   useEffect(() => {
     if (!pinsRef.current) return;
     pinsRef.current.clearLayers();
-    stories.forEach((s) => {
-      L.circleMarker([s.lat, s.lng], {
-        radius: 12, color: "#fff", weight: 3,
-        fillColor: STATUS_COLOR[s.status] || "#e53935", fillOpacity: 1,
-      })
-        .on("click", () => onPinTap(s))
+    incidents.forEach((g) => {
+      L.marker([g.lat, g.lng], { icon: incidentIcon(g), zIndexOffset: g.stories.length * 100 })
+        .on("click", () => onPinTap(g))
         .addTo(pinsRef.current);
     });
-  }, [stories, onPinTap]);
+  }, [incidents, onPinTap]);
 
   // Leaflet needs a size refresh whenever the map tab becomes visible again.
   useEffect(() => {
@@ -263,17 +307,17 @@ const categoryLabel = (s) =>
 function StoryImage({ story, big }) {
   const [revealed, setRevealed] = useState(false);
   const hidden = !!story.ai?.sensitiveContent && !revealed;
+  // Big (story viewer): show the WHOLE photo, scaled to fit, never cropped ("contain").
+  const bigBox = big ? { height: "auto" } : {};
+  const bigImg = big ? { width: "100%", height: "auto", maxHeight: "50vh", objectFit: "contain", display: "block" } : {};
+  const blur = hidden ? { filter: "blur(22px)", transform: "scale(1.2)" } : {};
   return (
     <div
       className={big ? "thumb big" : "thumb"}
-      style={{ position: "relative", overflow: "hidden", cursor: hidden ? "pointer" : "default" }}
-      onClick={() => hidden && setRevealed(true)}
+      style={{ position: "relative", overflow: "hidden", cursor: hidden ? "pointer" : "default", ...bigBox }}
+      onClick={(e) => { if (hidden) { e.stopPropagation(); setRevealed(true); } }}
     >
-      <img
-        src={story.imageData}
-        alt=""
-        style={hidden ? { filter: "blur(22px)", transform: "scale(1.2)" } : undefined}
-      />
+      <img src={story.imageData} alt="" style={{ ...bigImg, ...blur }} />
       {hidden && (
         <div
           style={{
@@ -300,10 +344,39 @@ function StoryImage({ story, big }) {
   );
 }
 
-function StoryCard({ story, userPos, user, onNeedSignIn }) {
+// Where a story is: "Second Bridge · KM 6", "Bayan Lepas", "Gurney, George Town"...
+// Bridges are worked out on the phone; other areas come from OpenStreetMap (cached).
+function usePlaceName(story) {
+  const bridge = bridgeLabel(story.lat, story.lng);
+  // undefined = not looked up yet; null = looked up, no name found
+  const known = bridge || story.areaName || cachedArea(story.lat, story.lng);
+  const [looked, setLooked] = useState(undefined);
+  useEffect(() => {
+    if (known !== undefined) return; // already have an answer
+    let alive = true;
+    lookupArea(story.lat, story.lng).then((name) => alive && setLooked(name));
+    return () => { alive = false; };
+  }, [story.lat, story.lng, known]);
+  return known !== undefined ? known : looked;
+}
+
+// "📍 Bayan Lepas · 6.8 km away"
+function PlaceLine({ story, userPos }) {
+  const place = usePlaceName(story);
   const km = userPos ? distanceKm(userPos, story) : null;
+  const name = place === undefined ? "Finding area..." : place;
+  if (!name && km === null) return null;
   return (
-    <div className="card">
+    <span className="place-line">
+      📍 {[name, km !== null && `${formatKm(km)} away`].filter(Boolean).join(" · ")}
+    </span>
+  );
+}
+
+// One story in the Stories list. Tapping it opens the story viewer (reactions still work).
+function StoryCard({ story, userPos, user, onNeedSignIn, onOpen }) {
+  return (
+    <div className="card tappable" onClick={onOpen} role="button">
       <StoryImage story={story} />
       <div>
         <b>{iconFor(story.category)} {categoryLabel(story)}</b> <Badge status={story.status} demo={story.demo} />
@@ -311,36 +384,92 @@ function StoryCard({ story, userPos, user, onNeedSignIn }) {
         {story.ai?.summary && <p style={{ margin: "4px 0" }}>✨ {story.ai.summary}</p>}
         <p className="muted">
           {story.caption || "No caption"}<br />
+          <PlaceLine story={story} userPos={userPos} /><br />
           {story.demo ? "Demo story" : timeAgo(story.createdMs)} · {story.authorName}
-          {km !== null && ` · ${km < 1 ? Math.round(km * 1000) + " m" : km.toFixed(1) + " km"} away`}
           {story.approximate && " · approximate location"}
         </p>
-        <ReactionBar story={story} user={user} onNeedSignIn={onNeedSignIn} />
+        {/* Stop taps on reactions from also opening the story */}
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReactionBar story={story} user={user} onNeedSignIn={onNeedSignIn} />
+        </div>
       </div>
     </div>
   );
 }
 
-function PinModal({ story, onClose }) {
+// Full details of one story (one slide in the viewer).
+function StoryDetail({ story, userPos }) {
   // The user kept their own category although the AI suggested a different one.
   const aiDisagreed = story.categoryChoice === "mine" && story.aiCategory && story.aiCategory !== story.category;
   return (
+    <div className="viewer-slide">
+      <StoryImage story={story} big />
+      <h3>{iconFor(story.category)} {categoryLabel(story)}</h3>
+      <p>
+        <Badge status={story.status} demo={story.demo} />
+        {story.ai && <SeverityPill severity={story.ai.severity} />}
+      </p>
+      {story.ai?.summary && <p>✨ {story.ai.summary}</p>}
+      <p className="muted"><PlaceLine story={story} userPos={userPos} /></p>
+      {story.ai?.placeDetail && <p className="muted">Place detail: {story.ai.placeDetail}</p>}
+      {aiDisagreed && <p className="muted">AI suggested: {iconFor(story.aiCategory)} {story.aiCategory}</p>}
+      <p>{story.caption || "No caption"}</p>
+      <p className="muted">
+        {story.demo ? "Demo story" : timeAgo(story.createdMs)} · {story.authorName}
+        {story.approximate && " · approximate location"}
+      </p>
+    </div>
+  );
+}
+
+// Story viewer: all stories of one incident, swipe left/right (newest first).
+// Uses the browser's own scroll-snap for swiping, so it feels native on phones.
+function StoryViewer({ stories, startIndex, level, userPos, onClose }) {
+  const trackRef = useRef(null);
+  const [index, setIndex] = useState(startIndex);
+  const n = stories.length;
+
+  // Open at the story that was tapped.
+  useLayoutEffect(() => {
+    const t = trackRef.current;
+    if (t) t.scrollLeft = startIndex * t.clientWidth;
+  }, []); // eslint-disable-line
+
+  // Work out which slide is showing after a swipe.
+  function onScroll() {
+    const t = trackRef.current;
+    setIndex(Math.round(t.scrollLeft / t.clientWidth));
+  }
+  function go(i) {
+    const t = trackRef.current;
+    t.scrollTo({ left: i * t.clientWidth, behavior: "smooth" });
+  }
+
+  return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal tall" onClick={(e) => e.stopPropagation()}>
-        <StoryImage story={story} big />
-        <h3>{iconFor(story.category)} {categoryLabel(story)}</h3>
-        <p>
-          <Badge status={story.status} demo={story.demo} />
-          {story.ai && <SeverityPill severity={story.ai.severity} />}
-        </p>
-        {story.ai?.summary && <p>✨ {story.ai.summary}</p>}
-        {story.ai?.placeDetail && <p className="muted">Place detail: {story.ai.placeDetail}</p>}
-        {aiDisagreed && <p className="muted">AI suggested: {iconFor(story.aiCategory)} {story.aiCategory}</p>}
-        <p>{story.caption || "No caption"}</p>
-        <p className="muted">
-          {story.demo ? "Demo story" : timeAgo(story.createdMs)} · {story.authorName}
-          {story.approximate && " · approximate location"}
-        </p>
+      <div className="modal tall viewer" onClick={(e) => e.stopPropagation()}>
+        {n > 1 && (
+          <div className="viewer-head">
+            <span className="badge" style={{ background: CONFIDENCE_COLOR[level], color: "#fff" }}>
+              {level} · {n} posts
+            </span>
+            <span className="muted">{index + 1} / {n} · swipe for more</span>
+          </div>
+        )}
+
+        <div className="viewer-track" ref={trackRef} onScroll={onScroll}>
+          {stories.map((s) => <StoryDetail key={s.id} story={s} userPos={userPos} />)}
+        </div>
+
+        {n > 1 && (
+          <div className="viewer-nav">
+            <button className="chip" disabled={index === 0} onClick={() => go(index - 1)}>‹ Newer</button>
+            <span className="viewer-dots">
+              {stories.map((s, i) => <i key={s.id} className={i === index ? "on" : ""} />)}
+            </span>
+            <button className="chip" disabled={index === n - 1} onClick={() => go(index + 1)}>Older ›</button>
+          </div>
+        )}
         <button className="link" onClick={onClose}>Close</button>
       </div>
     </div>
@@ -741,7 +870,7 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [showSignIn, setShowSignIn] = useState(false);
   const [showPost, setShowPost] = useState(false);
-  const [pin, setPin] = useState(null);
+  const [viewer, setViewer] = useState(null); // { stories, startIndex, level } of the open incident
   const [userPos, setUserPos] = useState(null);
   const [stories, setStories] = useState([]);
   const [query_, setQuery] = useState("");
@@ -787,10 +916,31 @@ export default function App() {
     );
   }, []);
 
-  // Hide stories that expired while the page stayed open.
-  const liveStories = stories
-    .filter((s) => s.expiresMs > Date.now())
-    .sort((a, b) => b.createdMs - a.createdMs);
+  // Hide expired stories (newest first) and group them into incidents (one map dot each).
+  // Every story's badge shows its incident's level. Recomputed only when stories change,
+  // so the map isn't redrawn on every tap.
+  const { liveStories, incidents, incidentOf } = useMemo(() => {
+    const fresh = stories
+      .filter((s) => s.expiresMs > Date.now())
+      .sort((a, b) => b.createdMs - a.createdMs);
+    const groups = groupIncidents(fresh);
+    const of = {};
+    groups.forEach((g) => {
+      g.stories = g.stories.map((s) => ({ ...s, status: g.level }));
+      g.stories.forEach((s) => { of[s.id] = g; });
+    });
+    const live = fresh.map((s) => ({ ...s, status: of[s.id].level }));
+    return { liveStories: live, incidents: groups, incidentOf: of };
+  }, [stories]);
+
+  // Open the viewer on a whole incident (map dot), starting at its newest story.
+  const openIncident = useCallback((g) => setViewer({ stories: g.stories, startIndex: 0, level: g.level }), []);
+  // Open the viewer at one story (Stories list, Ask a Place), with the rest of its incident to swipe.
+  function openStory(story) {
+    const g = incidentOf[story.id];
+    if (!g) return setViewer({ stories: [story], startIndex: 0, level: story.status });
+    setViewer({ stories: g.stories, startIndex: Math.max(0, g.stories.findIndex((s) => s.id === story.id)), level: g.level });
+  }
 
   async function handleSignIn() {
     try {
@@ -841,8 +991,8 @@ export default function App() {
 
       <div className="screen">
         <div style={{ display: tab === "maps" ? "block" : "none", height: "100%" }}>
-          <MapScreen active={tab === "maps"} stories={liveStories} onPinTap={setPin} onLocated={setUserPos}
-                     focus={askFocus} />
+          <MapScreen active={tab === "maps"} stories={liveStories} incidents={incidents}
+                     onPinTap={openIncident} onLocated={setUserPos} focus={askFocus} />
         </div>
         {tab === "feed" && <Placeholder title="Feed" text="Credible news from the last 24 hours: coming soon." />}
         {tab === "stories" && (
@@ -850,8 +1000,9 @@ export default function App() {
             <h2>Stories</h2>
             {liveStories.length === 0 && <p className="muted">No live stories yet. Tap 📷 to post the first one.</p>}
             {liveStories.map((s) => (
-  <StoryCard key={s.id} story={s} userPos={userPos} user={user} onNeedSignIn={() => setShowSignIn(true)} />
-))}
+              <StoryCard key={s.id} story={s} userPos={userPos} user={user}
+                         onNeedSignIn={() => setShowSignIn(true)} onOpen={() => openStory(s)} />
+            ))}
           </div>
         )}
         {tab === "chat" && <Placeholder title="Chat" text="Coming soon." />}
@@ -860,7 +1011,7 @@ export default function App() {
         )}
         {showTopBar && asked && (
           <AskCard key={asked.id} query={asked.text} userPos={userPos} stories={liveStories}
-                   onPlace={setAskFocus} onOpenStory={setPin} onClose={closeAsk} />
+                   onPlace={setAskFocus} onOpenStory={openStory} onClose={closeAsk} />
         )}
       </div>
 
@@ -879,7 +1030,11 @@ export default function App() {
                    onClose={() => setShowPost(false)}
                    onPosted={() => { setShowPost(false); setTab("maps"); }} />
       )}
-      {pin && <PinModal story={pin} onClose={() => setPin(null)} />}
+      {viewer && (
+        <StoryViewer key={viewer.stories[viewer.startIndex]?.id} stories={viewer.stories}
+                     startIndex={viewer.startIndex} level={viewer.level} userPos={userPos}
+                     onClose={() => setViewer(null)} />
+      )}
     </div>
   );
 }
