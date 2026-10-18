@@ -1,6 +1,8 @@
 // src/gemini.js
-// Gemini story analysis via Firebase AI Logic (Gemini Developer API, free tier).
-// Tries the main model first; if it is overloaded or too slow, switches to a lighter model.
+// Gemini story analysis, in two layers so posting keeps working when one AI service is busy:
+//   1. Cloud Run /analyse -> Gemini on Vertex AI (paid quota from the project; most reliable)
+//   2. Backup: Firebase AI Logic (Gemini Developer API, free tier, which gets busy at peak times)
+// Each layer tries the main model first, then a lighter model.
 import { CATEGORIES as CATEGORY_LIST } from "./categories";
 import { getAI, getGenerativeModel, GoogleAIBackend, Schema } from "firebase/ai";
 import { app } from "./firebase";
@@ -30,6 +32,10 @@ const PRIMARY_MODEL = "gemini-3.8-flash"; // best quality
 const FALLBACK_MODEL = "gemini-3.5-flash-lite"; // lighter, used when the primary is busy or slow
 const PRIMARY_TIMEOUT_MS = 20000; // a healthy reply takes seconds; 20 s means it's overloaded
 const FALLBACK_TIMEOUT_MS = 30000;
+
+// Cloud Run backend (same service as Ask a Place).
+const API_URL = "https://jomisu-api-236629246156.asia-southeast1.run.app";
+const CLOUD_RUN_TIMEOUT_MS = 45000; // covers a cold start plus a busy main model
 
 const ai = getAI(app, { backend: new GoogleAIBackend() });
 
@@ -103,6 +109,46 @@ async function toInlineData(img) {
  * @param onStatus optional callback that shows retry progress text in the UI
  */
 export async function analyseStory({ frames, isVideo, caption, onStatus }) {
+  // Layer 1: Cloud Run + Vertex AI.
+  try {
+    return await analyseViaCloudRun({ frames, isVideo, caption });
+  } catch (err) {
+    console.warn("Cloud Run analysis failed, using the backup AI:", err?.message);
+    onStatus?.("Trying the backup AI…");
+  }
+  // Layer 2: Firebase AI Logic (below).
+  return analyseViaFirebase({ frames, isVideo, caption, onStatus });
+}
+
+// Images as data-URL strings (what compressImage and video frames give).
+async function toDataUrl(img) {
+  if (typeof img === "string") return img;
+  const { data, mimeType } = await toInlineData(img);
+  return `data:${mimeType};base64,${data}`;
+}
+
+// Layer 1: POST the frames to Cloud Run; it calls Gemini on Vertex AI with the same JSON schema.
+async function analyseViaCloudRun({ frames, isVideo, caption }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLOUD_RUN_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_URL}/analyse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames: await Promise.all(frames.map(toDataUrl)), isVideo, caption: caption || "" }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || data.error || `Server error ${res.status}`);
+    console.info("Gemini (Vertex AI via Cloud Run) analysed the story");
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Layer 2: Firebase AI Logic, straight from the browser.
+async function analyseViaFirebase({ frames, isVideo, caption, onStatus }) {
   const parts = [
     PROMPT,
     `Media: ${isVideo ? `${frames.length} frames from a video` : "one photo"}\nCaption: ${caption || "(none)"}`,

@@ -36,3 +36,8 @@
 ## Step 08: Demo data, incidents and judge experience (15-18 Oct 2026)
 - Built: labelled Penang demo stories (Second Bridge KM 6 / KM 9, Gurney) snapped onto the real bridge road; one map dot per incident with a post count and yellow/orange/red level; swipe viewer for all stories of an incident; whole photos (never cropped); tappable Stories list with place names (bridge KM or OpenStreetMap area); first-visit welcome card confirming location with a jump to the Penang demo, plus an always-visible Demo button
 - Files: api/seed_demo.py, api/bridge_points.py, src/App.jsx, src/geo.js, src/bridges.js, src/StoryViewer.css
+
+## Step 09: Reliable AI analysis (18 Oct 2026)
+- Problem: the free Gemini tier (Firebase AI Logic) sometimes answered "busy", so "Analyse with AI" failed
+- Built: Cloud Run /analyse endpoint calling Gemini on Vertex AI (main model, then a lighter one); the app uses it first and falls back to Firebase AI Logic automatically
+- Files: api/ai.py, api/main.py, src/gemini.js

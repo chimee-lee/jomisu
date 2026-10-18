@@ -46,19 +46,19 @@ Demo stories are labelled **🧪 Demo** and use drawn pictures (no real people o
 | **Firebase Hosting** | Serves the React web app at jomisu.web.app |
 | **Firebase Authentication** | Google sign-in to post and react; browsing needs no account |
 | **Cloud Firestore** | Stores stories (photo, category, AI tags, location, 24 h expiry), emoji reactions and user profiles; the app listens live, so new stories appear instantly |
-| **Gemini via Firebase AI Logic** | Analyses a photo (or frames from the first 5 s of a video) before posting: category, summary, severity, confidence, sensitive-content and faces/plates flags, place detail. Returns strict JSON via a response schema |
-| **Cloud Run** (`api/`, Python/Flask) | The **Ask a Place** API: reads live stories from Firestore, finds the place, and calls Gemini |
-| **Gemini on Vertex AI** (from Cloud Run) | (1) understands the question and extracts the place, (2) summarises the stories at that place and groups them into incidents with Unconfirmed / Likely / Confirmed levels |
+| **Cloud Run** (`api/`, Python/Flask) | Two APIs: **/analyse** (story analysis) and **/ask** (Ask a Place: reads live stories from Firestore, finds the place) |
+| **Gemini on Vertex AI** (from Cloud Run) | (1) Analyses a photo, or frames from the first 5 s of a video, before posting: category, summary, severity, confidence, sensitive-content and faces/plates flags, place detail. (2) Ask a Place: extracts the place from the question, summarises the stories there and groups them into incidents (Unconfirmed / Likely / Confirmed). Strict JSON via response schemas; a lighter model takes over if the main one is busy |
+| **Gemini via Firebase AI Logic** | Automatic backup for story analysis, called straight from the browser if Cloud Run is unreachable |
 
 ```mermaid
 flowchart LR
   U[Phone browser] -->|React app| H[Firebase Hosting]
   U -->|sign in| A[Firebase Auth]
   U <-->|live stories, reactions| F[(Cloud Firestore)]
-  U -->|photo/video frames| G1[Gemini via Firebase AI Logic]
-  U -->|"Ask a Place" question| R[Cloud Run API]
+  U -->|photo/video frames, "Ask a Place" question| R[Cloud Run API]
   R -->|read stories in the place| F
-  R -->|place + summary + incidents| G2[Gemini on Vertex AI]
+  R -->|tags, place, summary, incidents| G2[Gemini on Vertex AI]
+  U -.->|backup: photo analysis| G1[Gemini via Firebase AI Logic]
   R -->|place lookup| O[OpenStreetMap]
 ```
 
@@ -80,13 +80,13 @@ are stored as real road lines, so a story gets a KM position (e.g. *KM 6*) and i
 ```
 src/              React app (Vite)
   App.jsx         screens: Map, Stories, Ask a Place card, story viewer, post form, profile
-  gemini.js       Gemini story analysis (Firebase AI Logic, JSON schema, fallback model)
+  gemini.js       story analysis: Cloud Run /analyse first, Firebase AI Logic as backup
   geo.js          distances, bridge KM labels, dots on the bridge road, area names
   bridges.js      real centre lines of Penang's two bridges (generated from OpenStreetMap)
   firebase.js     Firebase app, Auth and Firestore setup
 api/              Cloud Run service (Python/Flask)
-  main.py         /health and /ask endpoints
-  ai.py           Gemini on Vertex AI: place extraction + summary/incident grouping
+  main.py         /health, /analyse and /ask endpoints
+  ai.py           Gemini on Vertex AI: story analysis, place extraction, summary/incident grouping
   geo.py          places (areas and bridge routes), OpenStreetMap geocoding
   seed_demo.py    seeds the labelled Penang demo stories
   bridge_points.py fetches the bridges' real road shape -> src/bridges.js
@@ -114,8 +114,13 @@ Demo data: `python api/seed_demo.py` (needs `google-cloud-firestore`).
 - Sensitive content is blurred; Gemini flags faces and number plates (automatic blurring is planned).
 - No secrets are stored in this repo. The Firebase web config is public by design; access is controlled by `firestore.rules`.
 
-## Roadmap
-Automatic face/plate blurring, comments, credible-news Feed, Archive of expired stories on the profile,
-trust scores, "report to authorities" button, and coverage beyond Penang.
+## Roadmap (not built yet: future versions)
+- Automatic face and number-plate blurring (Gemini already flags them), plus manual blur/sticker tools
+- Comments on stories (verified users, AI-moderated) and the Chat tab
+- Feed tab: credible local news from the past week (shows "coming soon" today)
+- Archive of your expired stories on the Profile page
+- Trust scores for reporters
+- "Report to authorities" button
+- Traffic and authority data integrations, and more seeded demo cities (the app already works anywhere; today's demo data is in Penang)
 
 Build history: [BUILD_LOG.md](BUILD_LOG.md)

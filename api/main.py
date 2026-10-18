@@ -2,6 +2,7 @@
 Jomisu API (Cloud Run)
   GET  /health  - service check
   POST /ask     - Ask a Place: {question, lat?, lng?} -> Gemini summary of stories at that place
+  POST /analyse - Story analysis: {frames: [data URLs], isVideo, caption} -> Gemini tags
 """
 from datetime import datetime, timezone
 
@@ -16,6 +17,8 @@ import geo
 MAX_QUESTION_CHARS = 300
 MAX_STORIES_SCANNED = 200   # newest active stories checked per question
 MAX_STORIES_TO_GEMINI = 40  # keeps each Gemini call small and cheap
+MAX_FRAMES = 8                  # a photo is 1 frame; a 5 s video sends a few
+MAX_MEDIA_CHARS = 8_000_000     # ~6 MB of images per request (photos are compressed to 800 px)
 ALLOWED_ORIGINS = ["https://jomisu.web.app", "https://jomisu.firebaseapp.com"]
 
 app = Flask(__name__)
@@ -62,6 +65,24 @@ def ask():
     except Exception as err:
         app.logger.exception("Ask a Place failed")
         return jsonify(error="ask_failed", message=str(err)), 502
+
+
+@app.post("/analyse")
+def analyse():
+    """Gemini (Vertex AI) analyses a story's photo/video frames before it is posted."""
+    data = request.get_json(silent=True) or {}
+    frames = data.get("frames")
+    if (not isinstance(frames, list) or not 1 <= len(frames) <= MAX_FRAMES
+            or not all(isinstance(f, str) and f.startswith("data:image/") for f in frames)
+            or sum(len(f) for f in frames) > MAX_MEDIA_CHARS):
+        return jsonify(error="bad_frames", message="Send 1-8 compressed images as data URLs."), 400
+    caption = str(data.get("caption") or "")[:280]
+    try:
+        result = ai.analyse_media(frames, bool(data.get("isVideo")), caption)
+        return jsonify(result.model_dump())
+    except Exception as err:
+        app.logger.exception("Story analysis failed")
+        return jsonify(error="analyse_failed", message=str(err)), 502
 
 
 def _read_position(data):
